@@ -171,6 +171,11 @@ export const useTierStore = defineStore('tier', () => {
 
   // ── Async startup: migrate legacy data + hydrate src from IDB ─────────────
   async function initFromIdb() {
+    // Set hydrating=true BEFORE the first await so that any applyRemoteState
+    // calls arriving while IDB is loading are queued in pendingRemoteState
+    // (not applied with an empty localSrcMap). This closes the race window
+    // between page load and idbGetAll() returning.
+    hydrating = true
     try {
       const imageMap = await idbGetAll()
 
@@ -197,12 +202,12 @@ export const useTierStore = defineStore('tier', () => {
         try { localStorage.removeItem('tier-maker-state') } catch { /* ignore */ }
       }
 
-      if (imageMap.size === 0) return
+      if (imageMap.size === 0) {
+        hydrating = false
+        return
+      }
 
-      // Hydrate src while blocking watcher (hydrating=true) to avoid
-      // redundant IDB writes. Also blocks applyRemoteState to prevent
-      // local state from being overwritten before images are loaded.
-      hydrating = true
+      // hydrating is already true (set above)
       const usedIds = new Set<string>()
 
       for (const tier of tiers.value) {
@@ -228,17 +233,20 @@ export const useTierStore = defineStore('tier', () => {
 
       hydrating = false
 
+      // Clean up IDB based on OUR state (after orphan recovery, before peer state).
+      // keepIds includes every image we know about, so we only delete truly orphaned
+      // entries. Running this before applyRemoteState prevents peer state from
+      // accidentally causing cleanup of images we still have locally.
+      idbCleanup(new Set(collectAllImages().map(img => img.id))).catch(() => {})
+
       // Apply any remote collaboration state that arrived while we were loading.
       // This handles the race where a peer broadcasts before our IDB read finishes.
+      // Now localSrcMap inside applyRemoteState will have all hydrated src values.
       if (pendingRemoteState) {
         const { tiers: pt, pool: pp } = pendingRemoteState
         pendingRemoteState = null
         applyRemoteState(pt, pp)
       }
-
-      // Safe to clean up IDB now: all orphans have been recovered into the pool,
-      // so collectAllImages() reflects every image we want to keep.
-      idbCleanup(new Set(collectAllImages().map(img => img.id))).catch(() => {})
     } catch {
       hydrating = false
     }
