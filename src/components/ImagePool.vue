@@ -243,9 +243,9 @@ defineExpose({ readFilesAsImages })
 .pool-items {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
-  padding: 12px;
-  min-height: 110px;
+  gap: 6px;
+  padding: 16px;
+  min-height: 140px;
   transition: background 0.15s;
 }
 

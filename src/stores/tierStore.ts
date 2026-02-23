@@ -57,15 +57,51 @@ function loadState(): SavedState | null {
 
 // Reactive flag yang bisa dibaca komponen untuk tampilkan warning
 export const storageFullWarning = ref(false)
+let warningDismissTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearWarning() {
+  storageFullWarning.value = false
+  if (warningDismissTimer) { clearTimeout(warningDismissTimer); warningDismissTimer = null }
+}
+
+function setWarning() {
+  storageFullWarning.value = true
+  if (warningDismissTimer) clearTimeout(warningDismissTimer)
+  warningDismissTimer = setTimeout(() => {
+    storageFullWarning.value = false
+    warningDismissTimer = null
+  }, 5000)
+}
 
 function saveState(tiers: TierConfig[], pool: TierImage[]) {
+  const data = JSON.stringify({ tiers, pool })
+
+  // First attempt: standard setItem
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ tiers, pool }))
-    storageFullWarning.value = false
-  } catch {
-    // localStorage penuh — beri tahu user
-    storageFullWarning.value = true
+    localStorage.setItem(STORAGE_KEY, data)
+    clearWarning()
+    return
+  } catch { /* quota exceeded — try fallback */ }
+
+  // Fallback: some browsers (Safari) throw QuotaExceededError even when replacing
+  // an existing key with SMALLER data because they check peak usage during the write.
+  // Fix: remove old entry first, then write. If write still fails, restore old entry
+  // to avoid silent data loss (e.g. user deleted images but old state persists).
+  const backup = localStorage.getItem(STORAGE_KEY)
+  try { localStorage.removeItem(STORAGE_KEY) } catch { /* ignore */ }
+
+  try {
+    localStorage.setItem(STORAGE_KEY, data)
+    clearWarning()
+    return
+  } catch { /* still too large */ }
+
+  // Restore backup so old saved state isn't lost
+  if (backup) {
+    try { localStorage.setItem(STORAGE_KEY, backup) } catch { /* truly out of space */ }
   }
+
+  setWarning()
 }
 
 export const useTierStore = defineStore('tier', () => {

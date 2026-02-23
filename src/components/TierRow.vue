@@ -171,7 +171,7 @@ onUnmounted(() =>
 <style scoped>
 .tier-row {
   display: flex;
-  min-height: 80px;
+  min-height: 114px;
   border-bottom: 1px solid #3a3a3a;
 }
 
@@ -181,17 +181,17 @@ onUnmounted(() =>
 }
 
 .tier-label {
-  width: 100px;
-  min-width: 100px;
+  width: 140px;
+  min-width: 140px;
   display: flex;
   align-items: center;
   justify-content: center;
   font-weight: bold;
-  font-size: 14px;
+  font-size: 24px;
   color: #111;
   cursor: pointer;
   text-align: center;
-  padding: 6px;
+  padding: 8px;
   word-break: break-word;
   line-height: 1.3;
 }
@@ -207,7 +207,7 @@ onUnmounted(() =>
   border-bottom: 2px solid rgba(0, 0, 0, 0.5);
   text-align: center;
   font-weight: bold;
-  font-size: 14px;
+  font-size: 24px;
   outline: none;
   color: #111;
   padding: 2px;
@@ -217,9 +217,9 @@ onUnmounted(() =>
   flex: 1;
   display: flex;
   flex-wrap: wrap;
-  gap: 3px;
-  padding: 4px;
-  min-height: 80px;
+  gap: 5px;
+  padding: 7px;
+  min-height: 114px;
   align-content: flex-start;
   background: #1c1c1c;
   transition: background 0.15s;

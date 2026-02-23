@@ -2,14 +2,15 @@
 import { onMounted, onUnmounted, ref } from 'vue'
 import { useTierStore, storageFullWarning } from '@/stores/tierStore'
 import { useCollaboration } from '@/composables/useCollaboration'
+import { useImageModal } from '@/composables/useImageModal'
 import TierRow from '@/components/TierRow.vue'
 import ImagePool from '@/components/ImagePool.vue'
 import type { TierImage } from '@/stores/tierStore'
 
 const store = useTierStore()
+const { activeImage, closeModal } = useImageModal()
 
 // --- Collaboration ---
-// Room ID diambil dari URL query param: ?room=abc123
 const urlRoom = new URLSearchParams(window.location.search).get('room') ?? ''
 const { isConnected, peerCount, isSyncing } = useCollaboration(urlRoom)
 
@@ -17,7 +18,6 @@ const roomId = ref<string>(urlRoom)
 const copied = ref(false)
 
 function startCollaboration() {
-  // Generate room ID 6 karakter, redirect ke URL baru (page reload sekali)
   const newRoom = Math.random().toString(36).slice(2, 8)
   window.location.href = `${window.location.pathname}?room=${newRoom}`
 }
@@ -60,8 +60,21 @@ function handlePaste(e: ClipboardEvent) {
   }
 }
 
-onMounted(() => window.addEventListener('paste', handlePaste))
-onUnmounted(() => window.removeEventListener('paste', handlePaste))
+// --- Global keyboard handlers ---
+function handleKeyDown(e: KeyboardEvent) {
+  if (e.key === 'Escape' && activeImage.value) {
+    closeModal()
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('paste', handlePaste)
+  window.addEventListener('keydown', handleKeyDown)
+})
+onUnmounted(() => {
+  window.removeEventListener('paste', handlePaste)
+  window.removeEventListener('keydown', handleKeyDown)
+})
 </script>
 
 <template>
@@ -69,7 +82,7 @@ onUnmounted(() => window.removeEventListener('paste', handlePaste))
     <!-- Storage full warning toast -->
     <Transition name="toast">
       <div v-if="storageFullWarning" class="toast toast-warning" role="alert">
-        ⚠ Storage penuh — gambar tidak tersimpan. Hapus beberapa gambar untuk melanjutkan.
+        ⚠ Storage penuh — gambar tetap bisa dipakai sesi ini, tapi tidak tersimpan setelah refresh.
       </div>
     </Transition>
 
@@ -78,13 +91,12 @@ onUnmounted(() => window.removeEventListener('paste', handlePaste))
         <div class="header-left">
           <h1 class="app-title">Tier Maker</h1>
           <p class="app-subtitle">
-            Drag images into tiers · Double-click labels to rename · Right-click to remove
+            Drag images into tiers · Click to preview · Double-click labels to rename · Right-click to remove
           </p>
         </div>
 
         <!-- Collaboration bar -->
         <div class="collab-bar">
-          <!-- Sedang dalam room -->
           <template v-if="roomId">
             <div class="room-status">
               <span
@@ -115,7 +127,6 @@ onUnmounted(() => window.removeEventListener('paste', handlePaste))
             </button>
           </template>
 
-          <!-- Belum dalam room -->
           <button v-else class="collab-btn start" aria-label="Start collaboration session" @click="startCollaboration">
             👥 Collaborate
           </button>
@@ -143,6 +154,29 @@ onUnmounted(() => window.removeEventListener('paste', handlePaste))
 
       <ImagePool />
     </main>
+
+    <!-- Image preview modal -->
+    <Teleport to="body">
+      <Transition name="modal">
+        <div
+          v-if="activeImage"
+          class="modal-overlay"
+          @click.self="closeModal"
+        >
+          <div class="modal-content">
+            <button class="modal-close" @click="closeModal" aria-label="Close preview">×</button>
+            <img
+              :src="activeImage.src"
+              :alt="activeImage.name || 'Image preview'"
+              class="modal-image"
+            />
+            <p v-if="activeImage.name && activeImage.name !== 'pasted-image'" class="modal-name">
+              {{ activeImage.name }}
+            </p>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
   </div>
 </template>
 
@@ -178,12 +212,10 @@ body {
 .app-header {
   background: #1a1a1a;
   border-bottom: 1px solid #333;
-  padding: 12px 24px;
+  padding: 14px 40px;
 }
 
 .header-inner {
-  max-width: 1200px;
-  margin: 0 auto;
   display: flex;
   align-items: center;
   gap: 16px;
@@ -196,15 +228,15 @@ body {
 }
 
 .app-title {
-  font-size: 20px;
+  font-size: 28px;
   font-weight: 700;
   color: #fff;
 }
 
 .app-subtitle {
-  font-size: 11px;
+  font-size: 13px;
   color: #555;
-  margin-top: 2px;
+  margin-top: 3px;
 }
 
 /* --- Collab bar --- */
@@ -271,8 +303,8 @@ body {
 .collab-btn {
   border: 1px solid #4a4a4a;
   border-radius: 5px;
-  padding: 5px 12px;
-  font-size: 12px;
+  padding: 6px 14px;
+  font-size: 13px;
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
   white-space: nowrap;
@@ -314,10 +346,9 @@ body {
 /* --- Main layout --- */
 .tier-maker {
   flex: 1;
-  max-width: 1200px;
   width: 100%;
-  margin: 24px auto;
-  padding: 0 16px;
+  margin: 28px 0;
+  padding: 0 40px;
 }
 
 .tiers-container {
@@ -328,7 +359,7 @@ body {
 .action-bar {
   display: flex;
   gap: 8px;
-  padding: 8px 12px;
+  padding: 10px 14px;
   background: #1e1e1e;
   border: 1px solid #3a3a3a;
   border-top: none;
@@ -338,10 +369,10 @@ body {
   background: #2e2e2e;
   border: 1px solid #4a4a4a;
   color: #ddd;
-  padding: 6px 16px;
+  padding: 7px 20px;
   border-radius: 4px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 14px;
   transition: background 0.15s, color 0.15s;
 }
 
@@ -387,5 +418,92 @@ body {
 .toast-leave-to {
   opacity: 0;
   transform: translateX(-50%) translateY(8px);
+}
+
+/* --- Image preview modal --- */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  padding: 24px;
+  cursor: zoom-out;
+}
+
+.modal-content {
+  position: relative;
+  max-width: min(90vw, 900px);
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  cursor: default;
+}
+
+.modal-image {
+  max-width: 100%;
+  max-height: calc(90vh - 60px);
+  object-fit: contain;
+  border-radius: 4px;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6);
+  display: block;
+  background: #1a1a1a;
+}
+
+.modal-name {
+  color: #aaa;
+  font-size: 13px;
+  text-align: center;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.modal-close {
+  position: absolute;
+  top: -14px;
+  right: -14px;
+  width: 32px;
+  height: 32px;
+  background: #333;
+  border: 1px solid #555;
+  color: #ccc;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1;
+  transition: background 0.15s, color 0.15s;
+}
+
+.modal-close:hover {
+  background: #c0392b;
+  border-color: #e74c3c;
+  color: #fff;
+}
+
+.modal-enter-active,
+.modal-leave-active {
+  transition: opacity 0.2s ease;
+}
+.modal-enter-from,
+.modal-leave-to {
+  opacity: 0;
+}
+.modal-enter-active .modal-content,
+.modal-leave-active .modal-content {
+  transition: transform 0.2s ease;
+}
+.modal-enter-from .modal-content,
+.modal-leave-to .modal-content {
+  transform: scale(0.92);
 }
 </style>

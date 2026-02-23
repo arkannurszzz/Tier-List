@@ -4,10 +4,11 @@ import { ref, watch, onUnmounted, nextTick } from 'vue'
 import type { TierConfig, TierImage } from '@/stores/tierStore'
 import { useTierStore } from '@/stores/tierStore'
 
-// Gunakan env var kalau ada, fallback ke public signaling servers
-const SIGNALING_SERVERS = (import.meta.env.VITE_SIGNALING_SERVERS as string | undefined)
+// Gunakan env var kalau ada — kalau tidak, pakai default bawaan y-webrtc
+// (wss://signaling.yjs.dev, wss://y-webrtc-oss-eu.fly.dev, wss://y-webrtc-oss-us.fly.dev)
+const CUSTOM_SIGNALING = (import.meta.env.VITE_SIGNALING_SERVERS as string | undefined)
   ?.split(',')
-  .map((s) => s.trim()) ?? ['wss://y-webrtc-eu.fly.dev', 'wss://y-webrtc-us.fly.dev']
+  .map((s) => s.trim())
 
 type ProviderLike = {
   on: (event: string, cb: (data: { synced: boolean }) => void) => void
@@ -25,7 +26,7 @@ export function useCollaboration(roomId: string) {
 
   const ydoc = new Y.Doc()
   const provider = new WebrtcProvider(`tier-maker-${roomId}`, ydoc, {
-    signaling: SIGNALING_SERVERS,
+    ...(CUSTOM_SIGNALING ? { signaling: CUSTOM_SIGNALING } : {}),
   })
   const yState = ydoc.getMap<string>('state')
 
