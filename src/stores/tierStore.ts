@@ -124,6 +124,8 @@ export const useTierStore = defineStore('tier', () => {
 
   let idbTimer: ReturnType<typeof setTimeout> | null = null
   let hydrating = false
+  // Remote state that arrived while IDB was still loading — applied after hydration.
+  let pendingRemoteState: { tiers: TierConfig[], pool: TierImage[] } | null = null
 
   // Track which image IDs are already persisted in IDB so we only write NEW images.
   // Without this, every state change (e.g. moving one item) would rewrite ALL images —
@@ -225,6 +227,14 @@ export const useTierStore = defineStore('tier', () => {
       for (const id of imageMap.keys()) _persistedIds.add(id)
 
       hydrating = false
+
+      // Apply any remote collaboration state that arrived while we were loading.
+      // This handles the race where a peer broadcasts before our IDB read finishes.
+      if (pendingRemoteState) {
+        const { tiers: pt, pool: pp } = pendingRemoteState
+        pendingRemoteState = null
+        applyRemoteState(pt, pp)
+      }
 
       // Safe to clean up IDB now: all orphans have been recovered into the pool,
       // so collectAllImages() reflects every image we want to keep.
@@ -360,8 +370,12 @@ export const useTierStore = defineStore('tier', () => {
   }
 
   function applyRemoteState(remoteTiers: TierConfig[], remotePool: TierImage[]) {
-    // Reject if IDB hydration is still in progress (race condition guard)
-    if (hydrating) return
+    // If IDB hydration is still in progress, queue this state and apply it after.
+    // Discarding it would mean the peer's state is permanently lost for this session.
+    if (hydrating) {
+      pendingRemoteState = { tiers: remoteTiers, pool: remotePool }
+      return
+    }
     // Guard against malformed payloads from peers
     if (!Array.isArray(remoteTiers) || !Array.isArray(remotePool)) return
 

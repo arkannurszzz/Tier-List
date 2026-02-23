@@ -61,6 +61,10 @@ export function useCollaboration(roomId: string) {
 
   function broadcastState() {
     if (applyingRemote) return
+    // Never send before the WebSocket is connected — channel.send() would fall
+    // back to Supabase's REST broadcast endpoint and get a 422 error because
+    // the channel isn't active on the server yet.
+    if (!isConnected.value) return
     if (broadcastTimer) clearTimeout(broadcastTimer)
     broadcastTimer = setTimeout(() => {
       channel.send({
