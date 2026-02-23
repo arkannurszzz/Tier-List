@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
 import { useTierStore, storageFullWarning } from '@/stores/tierStore'
-import { useCollaboration } from '@/composables/useCollaboration'
+import { useCollaboration, hasCollabBackend } from '@/composables/useCollaboration'
 import { useImageModal } from '@/composables/useImageModal'
 import TierRow from '@/components/TierRow.vue'
 import ImagePool from '@/components/ImagePool.vue'
@@ -95,8 +95,8 @@ onUnmounted(() => {
           </p>
         </div>
 
-        <!-- Collaboration bar -->
-        <div class="collab-bar">
+        <!-- Collaboration bar (only shown when Supabase env vars are set) -->
+        <div v-if="hasCollabBackend" class="collab-bar">
           <template v-if="roomId">
             <div class="room-status">
               <span

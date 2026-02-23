@@ -1,16 +1,24 @@
-import * as Y from 'yjs'
-import { WebsocketProvider } from 'y-websocket'
-import { ref, watch, onUnmounted, nextTick } from 'vue'
+import { createClient } from '@supabase/supabase-js'
+import { ref, watch, onUnmounted } from 'vue'
 import type { TierConfig, TierImage } from '@/stores/tierStore'
 import { useTierStore } from '@/stores/tierStore'
 
-// WebSocket server URL — set VITE_WS_SERVER in Vercel env vars
-// pointing to your deployed ws-server (see ws-server/ directory).
-// Default falls back to the public Yjs demo server for quick testing.
-const WS_SERVER = (import.meta.env.VITE_WS_SERVER as string | undefined) ?? 'wss://demos.yjs.dev'
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string | undefined
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined
+
+export const hasCollabBackend = !!(SUPABASE_URL && SUPABASE_ANON_KEY)
+
+const supabase = hasCollabBackend
+  ? createClient(SUPABASE_URL!, SUPABASE_ANON_KEY!)
+  : null
+
+interface StatePayload {
+  tiers: TierConfig[]
+  pool: TierImage[]
+}
 
 export function useCollaboration(roomId: string) {
-  if (!roomId) {
+  if (!roomId || !supabase) {
     return { isConnected: ref(false), peerCount: ref(0), isSyncing: ref(false) }
   }
 
@@ -19,69 +27,78 @@ export function useCollaboration(roomId: string) {
   const peerCount = ref(0)
   const isSyncing = ref(true)
 
-  const ydoc = new Y.Doc()
-  const provider = new WebsocketProvider(WS_SERVER, `tier-maker-${roomId}`, ydoc)
-  const yState = ydoc.getMap<string>('state')
-
   let applyingRemote = false
   let broadcastTimer: ReturnType<typeof setTimeout> | null = null
+  const clientId = crypto.randomUUID()
 
-  function applyYjsState(): boolean {
-    const tiersJson = yState.get('tiers')
-    const poolJson = yState.get('pool')
-    if (!tiersJson) return false
+  const channel = supabase.channel(`tier-maker-${roomId}`, {
+    config: {
+      broadcast: { self: false },
+      presence: { key: clientId },
+    },
+  })
 
-    try {
-      const remoteTiers = JSON.parse(tiersJson) as TierConfig[]
-      const remotePool = poolJson ? (JSON.parse(poolJson) as TierImage[]) : []
-      applyingRemote = true
-      store.applyRemoteState(remoteTiers, remotePool)
-      nextTick(() => { applyingRemote = false })
-    } catch {
-      applyingRemote = false
-    }
-    return true
+  function applyRemoteState(payload: StatePayload) {
+    applyingRemote = true
+    store.applyRemoteState(payload.tiers, payload.pool)
+    // Use a microtask to reset the flag after Vue has processed reactivity
+    Promise.resolve().then(() => { applyingRemote = false })
   }
 
   function broadcastState() {
     if (applyingRemote) return
     if (broadcastTimer) clearTimeout(broadcastTimer)
     broadcastTimer = setTimeout(() => {
-      ydoc.transact(() => {
-        yState.set('tiers', JSON.stringify(store.tiers))
-        yState.set('pool', JSON.stringify(store.pool))
+      channel.send({
+        type: 'broadcast',
+        event: 'state',
+        payload: { tiers: store.tiers, pool: store.pool } satisfies StatePayload,
       })
     }, 200)
   }
 
-  yState.observe((event) => {
-    if (event.transaction.local) return
-    applyYjsState()
+  // Another peer just joined and is requesting the current state
+  channel.on('broadcast', { event: 'request-state' }, () => {
+    channel.send({
+      type: 'broadcast',
+      event: 'state',
+      payload: { tiers: store.tiers, pool: store.pool } satisfies StatePayload,
+    })
   })
 
-  const updatePeerCount = () => {
-    const n = Math.max(0, provider.awareness.getStates().size - 1)
-    peerCount.value = n
-  }
-  provider.awareness.on('change', updatePeerCount)
-
-  // 'sync' fires with true when the document is fully in sync with the server
-  const syncFallback = setTimeout(() => {
-    if (!isSyncing.value) return
-    isSyncing.value = false
-    if (!yState.get('tiers')) broadcastState()
-  }, 6000)
-
-  provider.on('sync', (synced: boolean) => {
-    if (!synced) return
-    clearTimeout(syncFallback)
-    isSyncing.value = false
-    if (!applyYjsState()) broadcastState()
+  // A peer broadcast their full state
+  channel.on('broadcast', { event: 'state' }, ({ payload }) => {
+    applyRemoteState(payload as StatePayload)
   })
 
-  provider.on('status', (event: { status: 'connected' | 'disconnected' | 'connecting' }) => {
-    isConnected.value = event.status === 'connected'
-    if (event.status === 'connected') updatePeerCount()
+  // Track presence for peer count
+  channel.on('presence', { event: 'sync' }, () => {
+    const states = channel.presenceState()
+    peerCount.value = Math.max(0, Object.keys(states).length - 1)
+  })
+  channel.on('presence', { event: 'join' }, () => {
+    const states = channel.presenceState()
+    peerCount.value = Math.max(0, Object.keys(states).length - 1)
+  })
+  channel.on('presence', { event: 'leave' }, () => {
+    const states = channel.presenceState()
+    peerCount.value = Math.max(0, Object.keys(states).length - 1)
+  })
+
+  channel.subscribe(async (status) => {
+    if (status === 'SUBSCRIBED') {
+      isConnected.value = true
+      isSyncing.value = false
+      await channel.track({ joined_at: Date.now() })
+      // Ask peers for current state (in case we're late joiner)
+      channel.send({
+        type: 'broadcast',
+        event: 'request-state',
+        payload: {},
+      })
+    } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
+      isConnected.value = false
+    }
   })
 
   const stopWatch = watch(
@@ -92,12 +109,8 @@ export function useCollaboration(roomId: string) {
 
   onUnmounted(() => {
     if (broadcastTimer) clearTimeout(broadcastTimer)
-    clearTimeout(syncFallback)
     stopWatch()
-    provider.awareness.off('change', updatePeerCount)
-    provider.disconnect()
-    provider.destroy()
-    ydoc.destroy()
+    supabase.removeChannel(channel)
   })
 
   return { isConnected, peerCount, isSyncing }
