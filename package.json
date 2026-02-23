@@ -14,7 +14,7 @@
     "pinia": "^3.0.4",
     "vue": "^3.5.28",
     "vue-router": "^5.0.2",
-    "y-webrtc": "^10.3.0",
+    "y-websocket": "^3.0.0",
     "yjs": "^13.6.29"
   },
   "devDependencies": {

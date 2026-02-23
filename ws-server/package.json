@@ -1,0 +1,14 @@
+{
+  "name": "tier-maker-ws",
+  "version": "1.0.0",
+  "description": "y-websocket relay server for Tier Maker collaboration",
+  "scripts": {
+    "start": "y-websocket"
+  },
+  "dependencies": {
+    "@y/websocket-server": "latest"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

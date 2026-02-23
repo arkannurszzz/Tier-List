@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: tier-maker-ws
+    runtime: node
+    rootDir: ws-server
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        value: 10000
