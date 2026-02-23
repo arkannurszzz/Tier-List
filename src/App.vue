@@ -12,6 +12,7 @@ const store = useTierStore()
 const { activeImage, closeModal } = useImageModal()
 
 const pasteError = ref(false)
+const isPasting = ref(false)
 let pasteErrorTimer: ReturnType<typeof setTimeout> | null = null
 function showPasteError() {
   if (pasteErrorTimer) clearTimeout(pasteErrorTimer)
@@ -27,7 +28,7 @@ const roomId = ref<string>(urlRoom)
 const copied = ref(false)
 
 function startCollaboration() {
-  const newRoom = Math.random().toString(36).slice(2, 8)
+  const newRoom = crypto.randomUUID().replace(/-/g, '').slice(0, 8)
   window.location.href = `${window.location.pathname}?room=${newRoom}`
 }
 
@@ -43,27 +44,30 @@ async function copyShareLink() {
 
 // --- Paste handler ---
 function generateId(): string {
-  return Math.random().toString(36).slice(2) + Date.now().toString(36)
+  return crypto.randomUUID().replace(/-/g, '')
 }
 
-function handlePaste(e: ClipboardEvent) {
+async function handlePaste(e: ClipboardEvent) {
   const items = e.clipboardData?.items
   if (!items) return
 
-  for (const item of items) {
-    if (item.type.startsWith('image/')) {
-      const file = item.getAsFile()
-      if (!file) continue
+  const imageItems = [...items].filter(item => item.type.startsWith('image/'))
+  if (imageItems.length === 0) return
 
-      // Resize before storing — same pipeline as file uploads
-      resizeImage(file)
-        .then((src) => {
-          const img: TierImage = { id: generateId(), src, name: 'pasted-image' }
-          store.addImagesToPool([img])
-        })
-        .catch(() => showPasteError())
-    }
-  }
+  isPasting.value = true
+  const results = await Promise.allSettled(
+    imageItems.map(item => {
+      const file = item.getAsFile()
+      if (!file) return Promise.reject(new Error('No file'))
+      return resizeImage(file).then(src => {
+        const img: TierImage = { id: generateId(), src, name: 'pasted-image' }
+        store.addImagesToPool([img])
+      })
+    }),
+  )
+  isPasting.value = false
+  const failed = results.filter(r => r.status === 'rejected').length
+  if (failed > 0) showPasteError()
 }
 
 // --- Global keyboard handlers ---
@@ -89,6 +93,13 @@ onUnmounted(() => {
     <Transition name="toast">
       <div v-if="storageFullWarning" class="toast toast-warning" role="alert">
         ⚠ Storage penuh — gambar tetap bisa dipakai sesi ini, tapi tidak tersimpan setelah refresh.
+      </div>
+    </Transition>
+
+    <!-- Paste loading toast -->
+    <Transition name="toast">
+      <div v-if="isPasting" class="toast toast-info" role="alert">
+        Memproses gambar dari clipboard...
       </div>
     </Transition>
 
@@ -427,6 +438,12 @@ body {
   background: #6b1a1a;
   border: 1px solid #a03030;
   color: #ffaaaa;
+}
+
+.toast-info {
+  background: #1a3a1a;
+  border: 1px solid #2a6a2a;
+  color: #7af57a;
 }
 
 .toast-enter-active,

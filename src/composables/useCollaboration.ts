@@ -46,6 +46,19 @@ export function useCollaboration(roomId: string) {
     nextTick(() => { applyingRemote = false })
   }
 
+  // Strip image src before broadcasting: base64 data can be megabytes and will
+  // exceed Supabase Realtime's message size limit (causing 422 errors). Each
+  // peer restores src locally from their own IDB via applyRemoteState.
+  function slimPayload(): StatePayload {
+    return {
+      tiers: store.tiers.map(t => ({
+        ...t,
+        items: t.items.map(i => ({ id: i.id, name: i.name, src: '' })),
+      })),
+      pool: store.pool.map(i => ({ id: i.id, name: i.name, src: '' })),
+    }
+  }
+
   function broadcastState() {
     if (applyingRemote) return
     if (broadcastTimer) clearTimeout(broadcastTimer)
@@ -53,7 +66,7 @@ export function useCollaboration(roomId: string) {
       channel.send({
         type: 'broadcast',
         event: 'state',
-        payload: { tiers: store.tiers, pool: store.pool } satisfies StatePayload,
+        payload: slimPayload(),
       })
     }, 200)
   }
@@ -63,7 +76,7 @@ export function useCollaboration(roomId: string) {
     channel.send({
       type: 'broadcast',
       event: 'state',
-      payload: { tiers: store.tiers, pool: store.pool } satisfies StatePayload,
+      payload: slimPayload(),
     })
   })
 

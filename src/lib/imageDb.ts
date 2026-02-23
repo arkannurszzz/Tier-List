@@ -79,6 +79,25 @@ export async function idbPutMany(pairs: Array<[string, string]>): Promise<void> 
   }
 }
 
+/** Returns true when IDB is open and working (false in private browsing or after a failure). */
+export function isIdbAvailable(): boolean { return !_idbUnavailable }
+
+/** Synchronous IDB write — safe to call in beforeunload handlers.
+ *  Requires the DB to already be open (_db set); always updates the memory store.
+ *  The transaction is fire-and-forget: browsers keep started IDB transactions
+ *  alive through page teardown so data is not lost. */
+export function idbPutManySync(pairs: Array<[string, string]>): void {
+  if (pairs.length === 0) return
+  for (const [id, src] of pairs) _mem.set(id, src)
+  if (_idbUnavailable || !_db) return
+  try {
+    const tx    = _db.transaction(STORE, 'readwrite')
+    const store = tx.objectStore(STORE)
+    for (const [id, src] of pairs) store.put(src, id)
+    // No await — the started transaction survives page unload
+  } catch { /* ignore */ }
+}
+
 /** Delete IDB entries not in keepIds (garbage collect deleted images).
  *  Also prunes the memory store. */
 export async function idbCleanup(keepIds: Set<string>): Promise<void> {

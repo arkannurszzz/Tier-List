@@ -1,6 +1,6 @@
 import { ref, watch } from 'vue'
 import { defineStore } from 'pinia'
-import { idbGetAll, idbPutMany, idbCleanup } from '@/lib/imageDb'
+import { idbGetAll, idbPutMany, idbPutManySync, idbCleanup, isIdbAvailable } from '@/lib/imageDb'
 
 export interface TierImage {
   id: string
@@ -125,12 +125,17 @@ export const useTierStore = defineStore('tier', () => {
   let idbTimer: ReturnType<typeof setTimeout> | null = null
   let hydrating = false
 
+  // Track which image IDs are already persisted in IDB so we only write NEW images.
+  // Without this, every state change (e.g. moving one item) would rewrite ALL images —
+  // O(n) writes that make adding more images progressively slower and eventually fail.
+  const _persistedIds = new Set<string>()
+
   function flushIdbSync() {
     if (idbTimer) { clearTimeout(idbTimer); idbTimer = null }
     const all = collectAllImages()
-    const newImages = all.filter(img => img.src)
-    // Fire-and-forget: browser keeps in-flight IDB transactions alive on unload
-    idbPutMany(newImages.map(img => [img.id, img.src]))
+    const toWrite = all.filter(img => img.src && !_persistedIds.has(img.id))
+    // Use synchronous transaction so data is committed before page tears down
+    if (toWrite.length > 0) idbPutManySync(toWrite.map(img => [img.id, img.src]))
   }
 
   function scheduleIdbSync() {
@@ -138,10 +143,18 @@ export const useTierStore = defineStore('tier', () => {
     idbTimer = setTimeout(() => {
       idbTimer = null
       const all = collectAllImages()
-      const newImages = all.filter(img => img.src)
-      idbPutMany(newImages.map(img => [img.id, img.src])).catch(() => {})
-      idbCleanup(new Set(all.map(img => img.id))).catch(() => {})
-    }, 500)
+      const toWrite = all.filter(img => img.src && !_persistedIds.has(img.id))
+      if (toWrite.length === 0) return
+      // idbCleanup intentionally removed: cleanup runs only at startup (initFromIdb)
+      idbPutMany(toWrite.map(img => [img.id, img.src]))
+        .then(() => {
+          // Only mark as persisted if IDB is actually available
+          if (isIdbAvailable()) {
+            for (const img of toWrite) _persistedIds.add(img.id)
+          }
+        })
+        .catch(() => {})
+    }, 150)
   }
 
   function collectAllImages(): TierImage[] {
@@ -188,17 +201,34 @@ export const useTierStore = defineStore('tier', () => {
       // redundant IDB writes. Also blocks applyRemoteState to prevent
       // local state from being overwritten before images are loaded.
       hydrating = true
+      const usedIds = new Set<string>()
+
       for (const tier of tiers.value) {
         for (const item of tier.items) {
           const src = imageMap.get(item.id)
-          if (src) item.src = src
+          if (src) { item.src = src; usedIds.add(item.id) }
         }
       }
       for (const item of pool.value) {
         const src = imageMap.get(item.id)
-        if (src) item.src = src
+        if (src) { item.src = src; usedIds.add(item.id) }
       }
+
+      // Recover orphaned IDB images (e.g. when localStorage was cleared).
+      // Rather than letting them get garbage-collected, put them back in the pool
+      // so the user's images are never silently lost.
+      for (const [id, src] of imageMap) {
+        if (!usedIds.has(id)) pool.value.push({ id, src })
+      }
+
+      // All images from IDB are already persisted — no need to rewrite them.
+      for (const id of imageMap.keys()) _persistedIds.add(id)
+
       hydrating = false
+
+      // Safe to clean up IDB now: all orphans have been recovered into the pool,
+      // so collectAllImages() reflects every image we want to keep.
+      idbCleanup(new Set(collectAllImages().map(img => img.id))).catch(() => {})
     } catch {
       hydrating = false
     }
@@ -335,16 +365,31 @@ export const useTierStore = defineStore('tier', () => {
     // Guard against malformed payloads from peers
     if (!Array.isArray(remoteTiers) || !Array.isArray(remotePool)) return
 
+    // Build a lookup of images we currently have so we can restore src for items
+    // that peers broadcast without image data (we strip src before sending to stay
+    // within Supabase's broadcast size limits).
+    const localSrcMap = new Map<string, string>()
+    for (const img of collectAllImages()) {
+      if (img.src) localSrcMap.set(img.id, img.src)
+    }
+
     // Security: strip items with unsafe/suspicious src values (SVG injection, javascript: URIs)
     for (const tier of remoteTiers) {
       if (!Array.isArray(tier?.items)) { tier.items = []; continue }
       tier.items = tier.items.filter(
         item => item && typeof item.id === 'string' && isSafeSrc(item.src ?? ''),
       )
+      // Restore our local src for items the peer sent without image data
+      for (const item of tier.items) {
+        if (!item.src) item.src = localSrcMap.get(item.id) ?? ''
+      }
     }
     const safePool = remotePool.filter(
       item => item && typeof item.id === 'string' && isSafeSrc(item.src ?? ''),
     )
+    for (const item of safePool) {
+      if (!item.src) item.src = localSrcMap.get(item.id) ?? ''
+    }
 
     tiers.value = remoteTiers
     pool.value  = safePool

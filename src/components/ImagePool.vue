@@ -30,7 +30,7 @@ watch(
 )
 
 function generateId(): string {
-  return Math.random().toString(36).slice(2) + Date.now().toString(36)
+  return crypto.randomUUID().replace(/-/g, '')
 }
 
 
@@ -198,8 +198,8 @@ defineExpose({ readFilesAsImages })
         <TierItem :image="item" source="pool" />
       </div>
 
-      <!-- Upload loading overlay for bulk uploads -->
-      <div v-if="isUploading && store.pool.length === 0" class="pool-uploading">
+      <!-- Upload loading overlay: always show when uploading, below existing items -->
+      <div v-if="isUploading" class="pool-uploading" :class="{ inline: store.pool.length > 0 }">
         <span class="spinner large" />
         <p>Memproses gambar...</p>
       </div>
@@ -372,6 +372,16 @@ defineExpose({ readFilesAsImages })
   color: #666;
   font-size: 13px;
   padding: 16px;
+}
+
+/* When pool already has items, show as a compact tile next to them */
+.pool-uploading.inline {
+  width: 100px;
+  height: 100px;
+  padding: 8px;
+  flex-shrink: 0;
+  font-size: 11px;
+  gap: 6px;
 }
 
 .pool-empty {

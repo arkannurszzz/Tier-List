@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from "vue";
+import { ref, watch, onMounted, onUnmounted } from "vue";
 import type { TierConfig } from "@/stores/tierStore";
 import { useTierStore } from "@/stores/tierStore";
 import TierItem from "./TierItem.vue";
@@ -13,10 +13,17 @@ const props = defineProps<{
 const store = useTierStore();
 
 const isDragOver = ref(false);
+const insertIndex = ref<number | null>(null);
 const showSettings = ref(false);
 const editingLabel = ref(false);
 const labelInput = ref("");
 const settingsRef = ref<HTMLElement | null>(null);
+
+// Clear insert indicator when any drag ends
+watch(
+  () => store.draggingItem,
+  (val) => { if (!val) insertIndex.value = null },
+);
 
 function onDragOver(e: DragEvent) {
   e.preventDefault();
@@ -28,12 +35,36 @@ function onDragLeave(e: DragEvent) {
   const target = e.currentTarget as HTMLElement;
   if (!target.contains(e.relatedTarget as Node)) {
     isDragOver.value = false;
+    insertIndex.value = null;
   }
 }
 
+// Per-item hover: compute insert position within the tier
+function onItemDragOver(e: DragEvent, index: number) {
+  if (!store.draggingItem) return;
+  const target = e.currentTarget as HTMLElement;
+  const rect = target.getBoundingClientRect();
+  insertIndex.value = e.clientX < rect.left + rect.width / 2 ? index : index + 1;
+}
+
+// Per-item drop: insert at the computed position
+function onItemDrop(e: DragEvent) {
+  if (!store.draggingItem) return;
+  e.stopPropagation(); // prevent outer onDrop from also firing
+  const beforeItem =
+    insertIndex.value !== null && insertIndex.value < props.tier.items.length
+      ? props.tier.items[insertIndex.value]
+      : undefined;
+  store.moveToTier(props.tier.id, store.draggingItem.imageId, beforeItem?.id);
+  insertIndex.value = null;
+  isDragOver.value = false;
+}
+
+// Container drop: handles drops onto empty space (no item under cursor)
 function onDrop(e: DragEvent) {
   e.preventDefault();
   isDragOver.value = false;
+  insertIndex.value = null;
   if (!store.draggingItem) return;
   store.moveToTier(props.tier.id, store.draggingItem.imageId);
 }
@@ -96,18 +127,25 @@ onUnmounted(() =>
     <!-- Drop zone / Items -->
     <div
       class="tier-items"
-      :class="{ 'drag-over': isDragOver }"
+      :class="{ 'drag-over': isDragOver && insertIndex === null }"
       :data-tier-id="tier.id"
       @dragover="onDragOver"
       @dragleave="onDragLeave"
       @drop="onDrop"
     >
-      <TierItem
-        v-for="item in tier.items"
+      <div
+        v-for="(item, index) in tier.items"
         :key="item.id"
-        :image="item"
-        :source="tier.id"
-      />
+        class="tier-item-wrapper"
+        :class="{
+          'insert-before': insertIndex === index,
+          'insert-after': insertIndex === tier.items.length && index === tier.items.length - 1,
+        }"
+        @dragover.prevent="onItemDragOver($event, index)"
+        @drop="onItemDrop($event)"
+      >
+        <TierItem :image="item" :source="tier.id" />
+      </div>
     </div>
 
     <!-- Controls -->
@@ -271,6 +309,32 @@ onUnmounted(() =>
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+/* Per-item wrapper for insert-position indicator */
+.tier-item-wrapper {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.tier-item-wrapper.insert-before::before,
+.tier-item-wrapper.insert-after::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: #4af;
+  border-radius: 2px;
+  z-index: 20;
+}
+
+.tier-item-wrapper.insert-before::before {
+  left: -3px;
+}
+
+.tier-item-wrapper.insert-after::after {
+  right: -3px;
 }
 
 .settings-wrapper {
