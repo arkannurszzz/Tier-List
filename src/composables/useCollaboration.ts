@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
-import { ref, watch, onUnmounted } from 'vue'
+import { ref, watch, onUnmounted, nextTick } from 'vue'
 import type { TierConfig, TierImage } from '@/stores/tierStore'
 import { useTierStore } from '@/stores/tierStore'
 
@@ -41,8 +41,9 @@ export function useCollaboration(roomId: string) {
   function applyRemoteState(payload: StatePayload) {
     applyingRemote = true
     store.applyRemoteState(payload.tiers, payload.pool)
-    // Use a microtask to reset the flag after Vue has processed reactivity
-    Promise.resolve().then(() => { applyingRemote = false })
+    // Reset after Vue's post-flush watcher has run, so the collab watch
+    // sees applyingRemote=true and skips broadcasting the just-applied state
+    nextTick(() => { applyingRemote = false })
   }
 
   function broadcastState() {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onUnmounted } from 'vue'
 import type { TierImage } from '@/stores/tierStore'
 import { useTierStore } from '@/stores/tierStore'
 import { useImageModal } from '@/composables/useImageModal'
@@ -18,6 +18,8 @@ let didDragStart = false
 
 function onDragStart(e: DragEvent) {
   didDragStart = true
+  // Cancel any pending click so mouseup doesn't open modal after a drag
+  clickPending = false
   store.draggingItem = { source: props.source, imageId: props.image.id }
   if (e.dataTransfer) {
     e.dataTransfer.effectAllowed = 'move'
@@ -28,12 +30,12 @@ function onDragStart(e: DragEvent) {
 function onDragEnd() {
   store.draggingItem = null
   isDragging.value = false
-  setTimeout(() => { didDragStart = false }, 50)
+  // Small delay so any stray mouseup after drag doesn't open modal
+  setTimeout(() => { didDragStart = false }, 80)
 }
 
 // Click-to-preview: use mousedown+mouseup distance tracking because
 // @click on draggable="true" elements is unreliable in Chrome
-// (dragstart can suppress click even on short presses).
 let clickStartX = 0
 let clickStartY = 0
 let clickPending = false
@@ -50,9 +52,7 @@ function onMouseUp(e: MouseEvent) {
   clickPending = false
   if (didDragStart) return
   const dist = Math.hypot(e.clientX - clickStartX, e.clientY - clickStartY)
-  if (dist < 6) {
-    openModal(props.image.src, props.image.name)
-  }
+  if (dist < 6) openModal(props.image.src, props.image.name)
 }
 
 // --- Touch / Mobile drag ---
@@ -61,8 +61,14 @@ let touchOffsetX = 0
 let touchOffsetY = 0
 let touchMoved = false
 
+function cleanupGhost() {
+  if (ghost) {
+    ghost.remove()
+    ghost = null
+  }
+}
+
 function onTouchStart(e: TouchEvent) {
-  // Let the remove button handle its own tap — don't start drag logic
   if ((e.target as Element).closest('.remove-btn')) return
   touchMoved = false
   const touch = e.touches[0]
@@ -75,8 +81,9 @@ function onTouchStart(e: TouchEvent) {
   store.draggingItem = { source: props.source, imageId: props.image.id }
   isDragging.value = true
 
-  // Buat ghost element
   ghost = (e.currentTarget as HTMLElement).cloneNode(true) as HTMLElement
+  // Remove the non-functional remove button from the ghost clone
+  ghost.querySelector('.remove-btn')?.remove()
   ghost.style.cssText = `
     position: fixed;
     width: ${rect.width}px;
@@ -91,26 +98,21 @@ function onTouchStart(e: TouchEvent) {
 }
 
 function onTouchMove(e: TouchEvent) {
-  e.preventDefault() // Cegah scroll saat drag
+  e.preventDefault()
   touchMoved = true
   const touch = e.touches[0]
   if (!touch || !ghost) return
-
   ghost.style.left = `${touch.clientX - touchOffsetX}px`
   ghost.style.top = `${touch.clientY - touchOffsetY}px`
 }
 
 function onTouchEnd(e: TouchEvent) {
   isDragging.value = false
-  if (ghost) {
-    document.body.removeChild(ghost)
-    ghost = null
-  }
+  cleanupGhost()
 
-  // Tap (no significant move) → open preview modal (skip if tap was on remove button)
   if (!touchMoved) {
     store.draggingItem = null
-    const tapTarget = (e.target as Element)
+    const tapTarget = e.target as Element
     if (!tapTarget.closest('.remove-btn')) {
       openModal(props.image.src, props.image.name)
     }
@@ -123,14 +125,13 @@ function onTouchEnd(e: TouchEvent) {
     return
   }
 
-  // Cari elemen di bawah jari saat dilepas
   const el = document.elementFromPoint(touch.clientX, touch.clientY)
   const tierItems = el?.closest('[data-tier-id]')
   const poolEl = el?.closest('[data-pool-drop]')
 
   if (tierItems) {
-    const tierId = tierItems.getAttribute('data-tier-id')!
-    store.moveToTier(tierId, store.draggingItem.imageId)
+    const tierId = tierItems.getAttribute('data-tier-id')
+    if (tierId) store.moveToTier(tierId, store.draggingItem.imageId)
   } else if (poolEl) {
     store.moveToPool(store.draggingItem.imageId)
   }
@@ -147,6 +148,9 @@ function onContextMenu(e: MouseEvent) {
   e.preventDefault()
   store.removeImage(props.image.id)
 }
+
+// Cleanup ghost if component unmounts mid-drag (e.g. applyRemoteState during touch)
+onUnmounted(cleanupGhost)
 </script>
 
 <template>
@@ -164,7 +168,8 @@ function onContextMenu(e: MouseEvent) {
     @contextmenu="onContextMenu"
     :title="image.name || 'Click to preview · Right-click to remove'"
   >
-    <img :src="image.src" :alt="image.name || 'Image'" />
+    <img v-if="image.src" :src="image.src" :alt="image.name || 'Image'" loading="lazy" />
+    <div v-else class="img-placeholder" />
     <button
       class="remove-btn"
       :aria-label="`Remove ${image.name || 'image'}`"
@@ -183,7 +188,7 @@ function onContextMenu(e: MouseEvent) {
   cursor: grab;
   position: relative;
   user-select: none;
-  touch-action: none; /* Penting untuk touch drag */
+  touch-action: none;
 }
 
 .tier-item:active {
@@ -201,6 +206,19 @@ function onContextMenu(e: MouseEvent) {
   display: block;
   pointer-events: none;
   background: #111;
+}
+
+.img-placeholder {
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(110deg, #222 30%, #2e2e2e 50%, #222 70%);
+  background-size: 200% 100%;
+  animation: shimmer 1.2s infinite;
+}
+
+@keyframes shimmer {
+  0%   { background-position: 200% center; }
+  100% { background-position: -200% center; }
 }
 
 .remove-btn {
@@ -229,5 +247,15 @@ function onContextMenu(e: MouseEvent) {
 
 .remove-btn:hover {
   background: rgba(220, 0, 0, 1);
+}
+
+/* On touch-primary devices (phones/tablets), always show remove button
+   since there is no hover state */
+@media (hover: none) {
+  .remove-btn {
+    display: flex;
+    opacity: 0.75;
+    background: rgba(180, 0, 0, 0.7);
+  }
 }
 </style>

@@ -3,12 +3,25 @@ import { ref, watch } from 'vue'
 import { useTierStore } from '@/stores/tierStore'
 import type { TierImage } from '@/stores/tierStore'
 import TierItem from './TierItem.vue'
+import { resizeImage } from '@/lib/resizeImage'
 
 const store = useTierStore()
 
 const isDragOver = ref(false)
 const insertIndex = ref<number | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
+const isUploading = ref(false)
+
+// Status toast
+type ToastType = 'error' | 'warn' | 'info'
+const statusMsg = ref<{ text: string; type: ToastType } | null>(null)
+let statusTimer: ReturnType<typeof setTimeout> | null = null
+
+function showStatus(text: string, type: ToastType, duration = 4000) {
+  if (statusTimer) clearTimeout(statusTimer)
+  statusMsg.value = { text, type }
+  statusTimer = setTimeout(() => { statusMsg.value = null; statusTimer = null }, duration)
+}
 
 // Bersihkan insert indicator otomatis saat drag selesai
 watch(
@@ -20,26 +33,47 @@ function generateId(): string {
   return Math.random().toString(36).slice(2) + Date.now().toString(36)
 }
 
-const readError = ref<string | null>(null)
 
-function readFilesAsImages(files: FileList | File[]) {
+async function readFilesAsImages(files: FileList | File[]) {
   const arr = Array.from(files)
-  for (const file of arr) {
-    if (!file.type.startsWith('image/')) continue
-    const reader = new FileReader()
-    reader.onload = (e) => {
-      const img: TierImage = {
-        id: generateId(),
-        src: e.target!.result as string,
-        name: file.name,
-      }
-      store.addImagesToPool([img])
-    }
-    reader.onerror = () => {
-      readError.value = `Gagal membaca "${file.name}". Coba file lain.`
-      setTimeout(() => (readError.value = null), 4000)
-    }
-    reader.readAsDataURL(file)
+  const imageFiles = arr.filter(f => f.type.startsWith('image/'))
+  const skippedCount = arr.length - imageFiles.length
+
+  if (imageFiles.length === 0) {
+    if (skippedCount > 0) showStatus(`${skippedCount} file bukan gambar, dilewati`, 'warn')
+    return
+  }
+
+  isUploading.value = true
+
+  // Process all files concurrently, collect results
+  const results = await Promise.allSettled(
+    imageFiles.map(async (file) => {
+      const src = await resizeImage(file)
+      return { id: generateId(), src, name: file.name } as TierImage
+    }),
+  )
+
+  const images: TierImage[] = []
+  let failedCount = 0
+  for (const r of results) {
+    if (r.status === 'fulfilled') images.push(r.value)
+    else failedCount++
+  }
+
+  // Add all at once — single store mutation = single localStorage write
+  if (images.length > 0) store.addImagesToPool(images)
+
+  isUploading.value = false
+
+  // Feedback — only show toast when something went wrong or was skipped
+  const parts: string[] = []
+  if (failedCount > 0) parts.push(`${failedCount} gagal dibaca`)
+  if (skippedCount > 0) parts.push(`${skippedCount} bukan gambar`)
+
+  if (parts.length > 0) {
+    const prefix = images.length > 0 ? `${images.length} berhasil · ` : ''
+    showStatus(prefix + parts.join(' · '), failedCount > 0 ? 'error' : 'warn', 5000)
   }
 }
 
@@ -76,24 +110,18 @@ function onDrop(e: DragEvent) {
 
 // --- Per-item handlers (untuk reorder) ---
 function onItemDragOver(e: DragEvent, index: number) {
-  // Hanya aktif kalau drag dari dalam pool
   if (!store.draggingItem || store.draggingItem.source !== 'pool') return
-
   const target = e.currentTarget as HTMLElement
   const rect = target.getBoundingClientRect()
-  // Kiri = insert sebelum, kanan = insert sesudah
   insertIndex.value = e.clientX < rect.left + rect.width / 2 ? index : index + 1
 }
 
 function onItemDrop(e: DragEvent) {
   if (!store.draggingItem) return
-
   if (store.draggingItem.source === 'pool' && insertIndex.value !== null) {
-    // Stop propagation supaya pool container tidak handle juga
     e.stopPropagation()
     store.reorderPool(store.draggingItem.imageId, insertIndex.value)
   }
-  // Kalau bukan dari pool, biarkan event bubble ke pool container
   insertIndex.value = null
   isDragOver.value = false
 }
@@ -116,19 +144,31 @@ defineExpose({ readFilesAsImages })
 
 <template>
   <div class="image-pool">
-    <!-- Error toast -->
+    <!-- Status toast -->
     <Transition name="toast">
-      <div v-if="readError" class="toast toast-error" role="alert">{{ readError }}</div>
+      <div
+        v-if="statusMsg"
+        class="toast"
+        :class="`toast-${statusMsg.type}`"
+        role="alert"
+      >{{ statusMsg.text }}</div>
     </Transition>
 
     <div class="pool-header">
       <span class="pin-icon">📌</span>
       <span class="pool-title">Image Pool</span>
       <div class="pool-actions">
-        <button class="action-btn" @click="openFileDialog">Upload Images</button>
+        <button
+          class="action-btn"
+          :disabled="isUploading"
+          @click="openFileDialog"
+        >
+          <span v-if="isUploading" class="spinner" aria-hidden="true" />
+          {{ isUploading ? 'Uploading...' : 'Upload Images' }}
+        </button>
         <span class="hint">or Ctrl+V to paste</span>
         <button
-          v-if="store.pool.length > 0"
+          v-if="store.pool.length > 0 && !isUploading"
           class="action-btn danger"
           @click="store.clearPool()"
           title="Remove all images from pool"
@@ -158,7 +198,13 @@ defineExpose({ readFilesAsImages })
         <TierItem :image="item" source="pool" />
       </div>
 
-      <div v-if="store.pool.length === 0" class="pool-empty">
+      <!-- Upload loading overlay for bulk uploads -->
+      <div v-if="isUploading && store.pool.length === 0" class="pool-uploading">
+        <span class="spinner large" />
+        <p>Memproses gambar...</p>
+      </div>
+
+      <div v-else-if="store.pool.length === 0" class="pool-empty">
         <p>Drop images here · Upload files · Paste from clipboard (Ctrl+V)</p>
       </div>
     </div>
@@ -209,6 +255,9 @@ defineExpose({ readFilesAsImages })
 }
 
 .action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   background: #3a3a3a;
   border: 1px solid #555;
   color: #ddd;
@@ -216,12 +265,17 @@ defineExpose({ readFilesAsImages })
   border-radius: 4px;
   cursor: pointer;
   font-size: 12px;
-  transition: background 0.15s;
+  transition: background 0.15s, opacity 0.15s;
 }
 
-.action-btn:hover {
+.action-btn:hover:not(:disabled) {
   background: #4a4a4a;
   color: #fff;
+}
+
+.action-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .action-btn.danger {
@@ -240,6 +294,29 @@ defineExpose({ readFilesAsImages })
   font-size: 11px;
 }
 
+/* Spinner */
+.spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-top-color: #ddd;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+.spinner.large {
+  width: 28px;
+  height: 28px;
+  border-width: 3px;
+  border-top-color: #7ab8f5;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
 .pool-items {
   display: flex;
   flex-wrap: wrap;
@@ -255,13 +332,12 @@ defineExpose({ readFilesAsImages })
   outline-offset: -4px;
 }
 
-/* Wrapper untuk tiap item — posisi relative supaya insert line bisa absolute */
 .pool-item-wrapper {
   position: relative;
   flex-shrink: 0;
 }
 
-/* Garis biru di KIRI item = insert sebelum item ini */
+/* Insert indicator lines */
 .pool-item-wrapper.insert-before::before {
   content: '';
   position: absolute;
@@ -274,7 +350,6 @@ defineExpose({ readFilesAsImages })
   z-index: 20;
 }
 
-/* Garis biru di KANAN item terakhir = insert di paling akhir */
 .pool-item-wrapper.insert-after::after {
   content: '';
   position: absolute;
@@ -285,6 +360,18 @@ defineExpose({ readFilesAsImages })
   background: #4af;
   border-radius: 2px;
   z-index: 20;
+}
+
+.pool-uploading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  color: #666;
+  font-size: 13px;
+  padding: 16px;
 }
 
 .pool-empty {
@@ -303,6 +390,7 @@ defineExpose({ readFilesAsImages })
   display: none;
 }
 
+/* Toast */
 .toast {
   position: fixed;
   bottom: 24px;
@@ -314,12 +402,28 @@ defineExpose({ readFilesAsImages })
   z-index: 9999;
   pointer-events: none;
   white-space: nowrap;
+  max-width: calc(100vw - 48px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
 }
 
 .toast-error {
   background: #6b1a1a;
   border: 1px solid #a03030;
   color: #ffaaaa;
+}
+
+.toast-warn {
+  background: #4a3000;
+  border: 1px solid #8a6000;
+  color: #ffd080;
+}
+
+.toast-info {
+  background: #1a3a1a;
+  border: 1px solid #2a6a2a;
+  color: #7af57a;
 }
 
 .toast-enter-active,

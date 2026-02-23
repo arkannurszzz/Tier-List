@@ -1,5 +1,6 @@
 import { ref, watch } from 'vue'
 import { defineStore } from 'pinia'
+import { idbGetAll, idbPutMany, idbCleanup } from '@/lib/imageDb'
 
 export interface TierImage {
   id: string
@@ -14,17 +15,70 @@ export interface TierConfig {
   items: TierImage[]
 }
 
-const STORAGE_KEY = 'tier-maker-state'
+// ─── localStorage: structure only (NO src — stays tiny forever) ────────────
+
+const STORAGE_KEY = 'tier-maker-v2'
+
+// Slim types written to localStorage
+interface SlimImage { id: string; name?: string }
+interface SlimTier  { id: string; label: string; color: string; items: SlimImage[] }
+interface SlimState { v: 2; tiers: SlimTier[]; pool: SlimImage[] }
+
+// Old format (v1): had src embedded — used for one-time migration
+interface LegacyState {
+  tiers: Array<{ id: string; label: string; color: string; items: Array<{ id: string; src?: string; name?: string }> }>
+  pool: Array<{ id: string; src?: string; name?: string }>
+}
+
+function readLocalStorage(): SlimState | LegacyState | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY) ?? localStorage.getItem('tier-maker-state')
+    if (!raw) return null
+    return JSON.parse(raw) as SlimState | LegacyState
+  } catch { return null }
+}
+
+function isSlimState(s: SlimState | LegacyState): s is SlimState {
+  return (s as SlimState).v === 2
+}
+
+function saveStructure(tiers: TierConfig[], pool: TierImage[]) {
+  const slim: SlimState = {
+    v: 2,
+    tiers: tiers.map(t => ({
+      id:    t.id,
+      label: t.label,
+      color: t.color,
+      items: t.items.map(i => ({ id: i.id, name: i.name })),
+    })),
+    pool: pool.map(i => ({ id: i.id, name: i.name })),
+  }
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(slim)) } catch { /* ignore */ }
+}
+
+// ─── Security helpers ───────────────────────────────────────────────────────
+
+/** Only allow JPEG/PNG/GIF/WebP data URLs. Blocks SVG (can embed scripts/CSS)
+ *  and javascript: URIs from malicious peers in collaboration sessions. */
+function isSafeSrc(src: string): boolean {
+  if (!src) return true // empty = placeholder, always safe
+  return /^data:image\/(jpeg|png|gif|webp);base64,[A-Za-z0-9+/]+=*$/.test(src)
+}
+
+/** Reject color values that are not 6-digit hex to prevent CSS injection. */
+function isSafeColor(color: string): boolean {
+  return /^#[0-9a-fA-F]{6}$/.test(color)
+}
+
+// ─── Reactive storage-full warning (kept for compatibility) ──────────────
+
+export const storageFullWarning = ref(false)
+
+// ─── Tier defaults ─────────────────────────────────────────────────────────
 
 const TIER_COLORS = [
-  '#ff7f7f',
-  '#ffbf7f',
-  '#ffdf7f',
-  '#ffff7f',
-  '#bfff7f',
-  '#7fbfff',
-  '#bf7fff',
-  '#ff7fbf',
+  '#ff7f7f', '#ffbf7f', '#ffdf7f', '#ffff7f',
+  '#bfff7f', '#7fbfff', '#bf7fff', '#ff7fbf',
 ]
 
 const DEFAULT_TIERS: Omit<TierConfig, 'id'>[] = [
@@ -40,115 +94,154 @@ function generateId(): string {
   return Math.random().toString(36).slice(2) + Date.now().toString(36)
 }
 
-interface SavedState {
-  tiers: TierConfig[]
-  pool: TierImage[]
-}
-
-function loadState(): SavedState | null {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return null
-    return JSON.parse(raw) as SavedState
-  } catch {
-    return null
-  }
-}
-
-// Reactive flag yang bisa dibaca komponen untuk tampilkan warning
-export const storageFullWarning = ref(false)
-let warningDismissTimer: ReturnType<typeof setTimeout> | null = null
-
-function clearWarning() {
-  storageFullWarning.value = false
-  if (warningDismissTimer) { clearTimeout(warningDismissTimer); warningDismissTimer = null }
-}
-
-function setWarning() {
-  storageFullWarning.value = true
-  if (warningDismissTimer) clearTimeout(warningDismissTimer)
-  warningDismissTimer = setTimeout(() => {
-    storageFullWarning.value = false
-    warningDismissTimer = null
-  }, 5000)
-}
-
-function saveState(tiers: TierConfig[], pool: TierImage[]) {
-  const data = JSON.stringify({ tiers, pool })
-
-  // First attempt: standard setItem
-  try {
-    localStorage.setItem(STORAGE_KEY, data)
-    clearWarning()
-    return
-  } catch { /* quota exceeded — try fallback */ }
-
-  // Fallback: some browsers (Safari) throw QuotaExceededError even when replacing
-  // an existing key with SMALLER data because they check peak usage during the write.
-  // Fix: remove old entry first, then write. If write still fails, restore old entry
-  // to avoid silent data loss (e.g. user deleted images but old state persists).
-  const backup = localStorage.getItem(STORAGE_KEY)
-  try { localStorage.removeItem(STORAGE_KEY) } catch { /* ignore */ }
-
-  try {
-    localStorage.setItem(STORAGE_KEY, data)
-    clearWarning()
-    return
-  } catch { /* still too large */ }
-
-  // Restore backup so old saved state isn't lost
-  if (backup) {
-    try { localStorage.setItem(STORAGE_KEY, backup) } catch { /* truly out of space */ }
-  }
-
-  setWarning()
-}
+// ─── Store ─────────────────────────────────────────────────────────────────
 
 export const useTierStore = defineStore('tier', () => {
-  const saved = loadState()
 
-  const tiers = ref<TierConfig[]>(
-    saved?.tiers ??
-      DEFAULT_TIERS.map((t) => ({ ...t, id: generateId() })),
-  )
+  // ── Initialize from localStorage structure (no src yet) ──────────────────
+  const saved = readLocalStorage()
 
-  const pool = ref<TierImage[]>(saved?.pool ?? [])
+  function buildTiers(raw: LegacyState | SlimState | null): TierConfig[] {
+    if (!raw) return DEFAULT_TIERS.map(t => ({ ...t, id: generateId() }))
+    return raw.tiers.map(t => ({
+      id:    t.id,
+      label: t.label,
+      color: t.color,
+      items: t.items.map(i => ({ id: i.id, src: '', name: i.name })),
+    }))
+  }
 
-  // Tracks what is currently being dragged
+  function buildPool(raw: LegacyState | SlimState | null): TierImage[] {
+    if (!raw) return []
+    return raw.pool.map(i => ({ id: i.id, src: '', name: i.name }))
+  }
+
+  const tiers = ref<TierConfig[]>(buildTiers(saved))
+  const pool  = ref<TierImage[]>(buildPool(saved))
   const draggingItem = ref<{ source: 'pool' | string; imageId: string } | null>(null)
 
-  // Auto-save ke localStorage setiap kali tiers/pool berubah
-  watch([tiers, pool], () => saveState(tiers.value, pool.value), { deep: true })
+  // ── IndexedDB sync helpers ────────────────────────────────────────────────
+
+  let idbTimer: ReturnType<typeof setTimeout> | null = null
+  let hydrating = false
+
+  function flushIdbSync() {
+    if (idbTimer) { clearTimeout(idbTimer); idbTimer = null }
+    const all = collectAllImages()
+    const newImages = all.filter(img => img.src)
+    // Fire-and-forget: browser keeps in-flight IDB transactions alive on unload
+    idbPutMany(newImages.map(img => [img.id, img.src]))
+  }
+
+  function scheduleIdbSync() {
+    if (idbTimer) clearTimeout(idbTimer)
+    idbTimer = setTimeout(() => {
+      idbTimer = null
+      const all = collectAllImages()
+      const newImages = all.filter(img => img.src)
+      idbPutMany(newImages.map(img => [img.id, img.src])).catch(() => {})
+      idbCleanup(new Set(all.map(img => img.id))).catch(() => {})
+    }, 500)
+  }
+
+  function collectAllImages(): TierImage[] {
+    return [...pool.value, ...tiers.value.flatMap(t => t.items)]
+  }
+
+  // Flush pending IDB write immediately when user closes the tab.
+  // IDB transactions that have already started survive page unload in all major browsers.
+  if (typeof window !== 'undefined') {
+    window.addEventListener('beforeunload', flushIdbSync)
+  }
+
+  // ── Async startup: migrate legacy data + hydrate src from IDB ─────────────
+  async function initFromIdb() {
+    try {
+      const imageMap = await idbGetAll()
+
+      // One-time migration: old localStorage had src embedded → move to IDB
+      if (saved && !isSlimState(saved)) {
+        const toMigrate: Array<[string, string]> = []
+        const legacy = saved as LegacyState
+        for (const t of legacy.tiers) {
+          for (const i of t.items) {
+            if (i.src && !imageMap.has(i.id)) {
+              toMigrate.push([i.id, i.src])
+              imageMap.set(i.id, i.src)
+            }
+          }
+        }
+        for (const i of legacy.pool) {
+          if (i.src && !imageMap.has(i.id)) {
+            toMigrate.push([i.id, i.src])
+            imageMap.set(i.id, i.src)
+          }
+        }
+        if (toMigrate.length > 0) await idbPutMany(toMigrate)
+        saveStructure(tiers.value, pool.value)
+        try { localStorage.removeItem('tier-maker-state') } catch { /* ignore */ }
+      }
+
+      if (imageMap.size === 0) return
+
+      // Hydrate src while blocking watcher (hydrating=true) to avoid
+      // redundant IDB writes. Also blocks applyRemoteState to prevent
+      // local state from being overwritten before images are loaded.
+      hydrating = true
+      for (const tier of tiers.value) {
+        for (const item of tier.items) {
+          const src = imageMap.get(item.id)
+          if (src) item.src = src
+        }
+      }
+      for (const item of pool.value) {
+        const src = imageMap.get(item.id)
+        if (src) item.src = src
+      }
+      hydrating = false
+    } catch {
+      hydrating = false
+    }
+  }
+
+  initFromIdb()
+
+  // ── Watcher: save structure to localStorage + schedule IDB image sync ─────
+  // flush:'post' batches rapid mutations (e.g. applyRemoteState) into one call
+  watch(
+    [tiers, pool],
+    () => {
+      if (hydrating) return
+      saveStructure(tiers.value, pool.value)
+      scheduleIdbSync()
+    },
+    { deep: true, flush: 'post' },
+  )
+
+  // ── Actions ───────────────────────────────────────────────────────────────
 
   function addImagesToPool(images: TierImage[]) {
     pool.value.push(...images)
   }
 
   function findAndRemoveImage(imageId: string): TierImage | null {
-    const poolIdx = pool.value.findIndex((img) => img.id === imageId)
-    if (poolIdx !== -1) {
-      return pool.value.splice(poolIdx, 1)[0] ?? null
-    }
+    const poolIdx = pool.value.findIndex(img => img.id === imageId)
+    if (poolIdx !== -1) return pool.value.splice(poolIdx, 1)[0] ?? null
     for (const tier of tiers.value) {
-      const idx = tier.items.findIndex((img) => img.id === imageId)
-      if (idx !== -1) {
-        return tier.items.splice(idx, 1)[0] ?? null
-      }
+      const idx = tier.items.findIndex(img => img.id === imageId)
+      if (idx !== -1) return tier.items.splice(idx, 1)[0] ?? null
     }
     return null
   }
 
   function moveToTier(tierId: string, imageId: string, beforeImageId?: string) {
-    const img = findAndRemoveImage(imageId)
+    const img  = findAndRemoveImage(imageId)
     if (!img) return
-    const tier = tiers.value.find((t) => t.id === tierId)
+    const tier = tiers.value.find(t => t.id === tierId)
     if (!tier) return
     if (beforeImageId) {
-      const idx = tier.items.findIndex((i) => i.id === beforeImageId)
-      if (idx !== -1) {
-        tier.items.splice(idx, 0, img)
-        return
-      }
+      const idx = tier.items.findIndex(i => i.id === beforeImageId)
+      if (idx !== -1) { tier.items.splice(idx, 0, img); return }
     }
     tier.items.push(img)
   }
@@ -166,7 +259,7 @@ export const useTierStore = defineStore('tier', () => {
   function addTier() {
     const colorIdx = tiers.value.length % TIER_COLORS.length
     tiers.value.push({
-      id: generateId(),
+      id:    generateId(),
       label: 'New',
       color: TIER_COLORS[colorIdx] ?? '#7f7f7f',
       items: [],
@@ -174,14 +267,14 @@ export const useTierStore = defineStore('tier', () => {
   }
 
   function removeTier(tierId: string) {
-    const idx = tiers.value.findIndex((t) => t.id === tierId)
+    const idx = tiers.value.findIndex(t => t.id === tierId)
     if (idx === -1) return
     pool.value.push(...(tiers.value[idx]?.items ?? []))
     tiers.value.splice(idx, 1)
   }
 
   function moveTierUp(tierId: string) {
-    const idx = tiers.value.findIndex((t) => t.id === tierId)
+    const idx = tiers.value.findIndex(t => t.id === tierId)
     if (idx <= 0) return
     const tier = tiers.value.splice(idx, 1)[0]
     if (!tier) return
@@ -189,7 +282,7 @@ export const useTierStore = defineStore('tier', () => {
   }
 
   function moveTierDown(tierId: string) {
-    const idx = tiers.value.findIndex((t) => t.id === tierId)
+    const idx = tiers.value.findIndex(t => t.id === tierId)
     if (idx === -1 || idx >= tiers.value.length - 1) return
     const tier = tiers.value.splice(idx, 1)[0]
     if (!tier) return
@@ -197,17 +290,20 @@ export const useTierStore = defineStore('tier', () => {
   }
 
   function updateTierLabel(tierId: string, label: string) {
-    const tier = tiers.value.find((t) => t.id === tierId)
-    if (tier) tier.label = label
+    const tier = tiers.value.find(t => t.id === tierId)
+    // Enforce same 20-char limit even from remote peers
+    if (tier) tier.label = label.slice(0, 20)
   }
 
   function updateTierColor(tierId: string, color: string) {
-    const tier = tiers.value.find((t) => t.id === tierId)
+    // Validate hex color to prevent CSS injection via collaboration
+    if (!isSafeColor(color)) return
+    const tier = tiers.value.find(t => t.id === tierId)
     if (tier) tier.color = color
   }
 
   function clearTier(tierId: string) {
-    const tier = tiers.value.find((t) => t.id === tierId)
+    const tier = tiers.value.find(t => t.id === tierId)
     if (!tier) return
     pool.value.push(...tier.items)
     tier.items = []
@@ -224,20 +320,35 @@ export const useTierStore = defineStore('tier', () => {
     pool.value = []
   }
 
-  // Dipanggil oleh useCollaboration saat menerima state dari peer lain
-  function applyRemoteState(remoteTiers: TierConfig[], remotePool: TierImage[]) {
-    tiers.value = remoteTiers
-    pool.value = remotePool
-  }
-
   function reorderPool(imageId: string, toIndex: number) {
-    const fromIndex = pool.value.findIndex((img) => img.id === imageId)
+    const fromIndex = pool.value.findIndex(img => img.id === imageId)
     if (fromIndex === -1) return
     const img = pool.value[fromIndex]!
     pool.value.splice(fromIndex, 1)
-    // Adjust target index after removal
     const adjusted = fromIndex < toIndex ? toIndex - 1 : toIndex
     pool.value.splice(adjusted, 0, img)
+  }
+
+  function applyRemoteState(remoteTiers: TierConfig[], remotePool: TierImage[]) {
+    // Reject if IDB hydration is still in progress (race condition guard)
+    if (hydrating) return
+    // Guard against malformed payloads from peers
+    if (!Array.isArray(remoteTiers) || !Array.isArray(remotePool)) return
+
+    // Security: strip items with unsafe/suspicious src values (SVG injection, javascript: URIs)
+    for (const tier of remoteTiers) {
+      if (!Array.isArray(tier?.items)) { tier.items = []; continue }
+      tier.items = tier.items.filter(
+        item => item && typeof item.id === 'string' && isSafeSrc(item.src ?? ''),
+      )
+    }
+    const safePool = remotePool.filter(
+      item => item && typeof item.id === 'string' && isSafeSrc(item.src ?? ''),
+    )
+
+    tiers.value = remoteTiers
+    pool.value  = safePool
+    scheduleIdbSync()
   }
 
   return {

@@ -6,9 +6,18 @@ import { useImageModal } from '@/composables/useImageModal'
 import TierRow from '@/components/TierRow.vue'
 import ImagePool from '@/components/ImagePool.vue'
 import type { TierImage } from '@/stores/tierStore'
+import { resizeImage } from '@/lib/resizeImage'
 
 const store = useTierStore()
 const { activeImage, closeModal } = useImageModal()
+
+const pasteError = ref(false)
+let pasteErrorTimer: ReturnType<typeof setTimeout> | null = null
+function showPasteError() {
+  if (pasteErrorTimer) clearTimeout(pasteErrorTimer)
+  pasteError.value = true
+  pasteErrorTimer = setTimeout(() => { pasteError.value = false; pasteErrorTimer = null }, 4000)
+}
 
 // --- Collaboration ---
 const urlRoom = new URLSearchParams(window.location.search).get('room') ?? ''
@@ -46,16 +55,13 @@ function handlePaste(e: ClipboardEvent) {
       const file = item.getAsFile()
       if (!file) continue
 
-      const reader = new FileReader()
-      reader.onload = (evt) => {
-        const img: TierImage = {
-          id: generateId(),
-          src: evt.target!.result as string,
-          name: 'pasted-image',
-        }
-        store.addImagesToPool([img])
-      }
-      reader.readAsDataURL(file)
+      // Resize before storing — same pipeline as file uploads
+      resizeImage(file)
+        .then((src) => {
+          const img: TierImage = { id: generateId(), src, name: 'pasted-image' }
+          store.addImagesToPool([img])
+        })
+        .catch(() => showPasteError())
     }
   }
 }
@@ -83,6 +89,13 @@ onUnmounted(() => {
     <Transition name="toast">
       <div v-if="storageFullWarning" class="toast toast-warning" role="alert">
         ⚠ Storage penuh — gambar tetap bisa dipakai sesi ini, tapi tidak tersimpan setelah refresh.
+      </div>
+    </Transition>
+
+    <!-- Paste error toast -->
+    <Transition name="toast">
+      <div v-if="pasteError" class="toast toast-error" role="alert">
+        ⚠ Gagal membaca gambar dari clipboard.
       </div>
     </Transition>
 
@@ -408,6 +421,12 @@ body {
   background: #4a3000;
   border: 1px solid #8a6000;
   color: #ffd080;
+}
+
+.toast-error {
+  background: #6b1a1a;
+  border: 1px solid #a03030;
+  color: #ffaaaa;
 }
 
 .toast-enter-active,
