@@ -1,0 +1,340 @@
+<script setup lang="ts">
+import { ref, onMounted, onUnmounted } from "vue";
+import type { TierConfig } from "@/stores/tierStore";
+import { useTierStore } from "@/stores/tierStore";
+import TierItem from "./TierItem.vue";
+
+const props = defineProps<{
+  tier: TierConfig;
+  isFirst: boolean;
+  isLast: boolean;
+}>();
+
+const store = useTierStore();
+
+const isDragOver = ref(false);
+const showSettings = ref(false);
+const editingLabel = ref(false);
+const labelInput = ref("");
+const settingsRef = ref<HTMLElement | null>(null);
+
+function onDragOver(e: DragEvent) {
+  e.preventDefault();
+  isDragOver.value = true;
+}
+
+function onDragLeave(e: DragEvent) {
+  // Only trigger if leaving the container itself
+  const target = e.currentTarget as HTMLElement;
+  if (!target.contains(e.relatedTarget as Node)) {
+    isDragOver.value = false;
+  }
+}
+
+function onDrop(e: DragEvent) {
+  e.preventDefault();
+  isDragOver.value = false;
+  if (!store.draggingItem) return;
+  store.moveToTier(props.tier.id, store.draggingItem.imageId);
+}
+
+function startEditLabel() {
+  labelInput.value = props.tier.label;
+  editingLabel.value = true;
+}
+
+function saveLabel() {
+  const trimmed = labelInput.value.trim();
+  if (trimmed) store.updateTierLabel(props.tier.id, trimmed);
+  editingLabel.value = false;
+}
+
+function toggleSettings() {
+  showSettings.value = !showSettings.value;
+}
+
+function onColorChange(e: Event) {
+  store.updateTierColor(props.tier.id, (e.target as HTMLInputElement).value);
+}
+
+function handleClickOutside(e: MouseEvent) {
+  if (settingsRef.value && !settingsRef.value.contains(e.target as Node)) {
+    showSettings.value = false;
+  }
+}
+
+onMounted(() => document.addEventListener("mousedown", handleClickOutside));
+onUnmounted(() =>
+  document.removeEventListener("mousedown", handleClickOutside),
+);
+</script>
+
+<template>
+  <div class="tier-row">
+    <!-- Colored label -->
+    <div
+      class="tier-label"
+      :style="{ backgroundColor: tier.color }"
+      @dblclick="startEditLabel"
+      title="Double-click to edit label"
+    >
+      <input
+        v-if="editingLabel"
+        v-model="labelInput"
+        class="label-input"
+        maxlength="20"
+        autofocus
+        :aria-label="`Edit tier label, current: ${tier.label}`"
+        @blur="saveLabel"
+        @keyup.enter="saveLabel"
+        @keyup.escape="editingLabel = false"
+        @click.stop
+      />
+      <span v-else class="label-text">{{ tier.label }}</span>
+    </div>
+
+    <!-- Drop zone / Items -->
+    <div
+      class="tier-items"
+      :class="{ 'drag-over': isDragOver }"
+      :data-tier-id="tier.id"
+      @dragover="onDragOver"
+      @dragleave="onDragLeave"
+      @drop="onDrop"
+    >
+      <TierItem
+        v-for="item in tier.items"
+        :key="item.id"
+        :image="item"
+        :source="tier.id"
+      />
+    </div>
+
+    <!-- Controls -->
+    <div class="tier-controls">
+      <div ref="settingsRef" class="settings-wrapper">
+        <button class="control-btn" @click="toggleSettings" aria-label="Tier settings" title="Settings">
+          ⚙
+        </button>
+
+        <div v-if="showSettings" class="settings-dropdown">
+          <label class="color-row">
+            <span>Color</span>
+            <input type="color" :value="tier.color" @input="onColorChange" />
+          </label>
+          <button
+            @click="
+              startEditLabel();
+              showSettings = false;
+            "
+          >
+            Rename
+          </button>
+          <button
+            @click="
+              store.clearTier(tier.id);
+              showSettings = false;
+            "
+          >
+            Clear
+          </button>
+          <button @click="store.removeTier(tier.id)" class="danger">
+            Delete
+          </button>
+        </div>
+      </div>
+
+      <div class="arrows">
+        <button
+          class="control-btn"
+          :disabled="isFirst"
+          :aria-label="`Move tier ${tier.label} up`"
+          @click="store.moveTierUp(tier.id)"
+          title="Move up"
+        >
+          ▲
+        </button>
+        <button
+          class="control-btn"
+          :disabled="isLast"
+          :aria-label="`Move tier ${tier.label} down`"
+          @click="store.moveTierDown(tier.id)"
+          title="Move down"
+        >
+          ▼
+        </button>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.tier-row {
+  display: flex;
+  min-height: 80px;
+  border-bottom: 1px solid #3a3a3a;
+}
+
+/* Biar sudut atas tetap rounded setelah overflow:hidden dihapus dari container */
+.tier-row:first-child .tier-label {
+  border-radius: 4px 0 0 0;
+}
+
+.tier-label {
+  width: 100px;
+  min-width: 100px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+  font-size: 14px;
+  color: #111;
+  cursor: pointer;
+  text-align: center;
+  padding: 6px;
+  word-break: break-word;
+  line-height: 1.3;
+}
+
+.label-text {
+  pointer-events: none;
+}
+
+.label-input {
+  width: 88%;
+  background: rgba(0, 0, 0, 0.15);
+  border: none;
+  border-bottom: 2px solid rgba(0, 0, 0, 0.5);
+  text-align: center;
+  font-weight: bold;
+  font-size: 14px;
+  outline: none;
+  color: #111;
+  padding: 2px;
+}
+
+.tier-items {
+  flex: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  padding: 4px;
+  min-height: 80px;
+  align-content: flex-start;
+  background: #1c1c1c;
+  transition: background 0.15s;
+}
+
+.tier-items.drag-over {
+  background: #2a2a2a;
+  outline: 2px dashed #666;
+  outline-offset: -2px;
+}
+
+.tier-controls {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 4px 8px;
+  background: #242424;
+  border-left: 1px solid #3a3a3a;
+  min-width: 60px;
+}
+
+.control-btn {
+  background: none;
+  border: none;
+  color: #ccc;
+  cursor: pointer;
+  font-size: 15px;
+  padding: 3px 6px;
+  border-radius: 3px;
+  line-height: 1;
+  transition:
+    background 0.15s,
+    color 0.15s;
+}
+
+.control-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
+.control-btn:disabled {
+  opacity: 0.25;
+  cursor: not-allowed;
+}
+
+.arrows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-wrapper {
+  position: relative;
+}
+
+.settings-dropdown {
+  position: absolute;
+  right: calc(100% + 6px);
+  top: 0;
+  background: #2e2e2e;
+  border: 1px solid #4a4a4a;
+  border-radius: 6px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  z-index: 999;
+  min-width: 120px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+
+.color-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: #ccc;
+  cursor: default;
+}
+
+.color-row input[type="color"] {
+  width: 36px;
+  height: 24px;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+  padding: 0;
+  background: none;
+}
+
+.settings-dropdown button {
+  background: #3a3a3a;
+  border: 1px solid #555;
+  color: #fff;
+  padding: 5px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  text-align: left;
+  transition: background 0.15s;
+}
+
+.settings-dropdown button:hover {
+  background: #4a4a4a;
+}
+
+.settings-dropdown button.danger {
+  background: #6b1a1a;
+  border-color: #8b2a2a;
+}
+
+.settings-dropdown button.danger:hover {
+  background: #8b2020;
+}
+</style>
