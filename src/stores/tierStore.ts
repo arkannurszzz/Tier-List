@@ -413,9 +413,37 @@ export const useTierStore = defineStore('tier', () => {
       if (!item.src) item.src = localSrcMap.get(item.id) ?? ''
     }
 
+    // Preserve local images the peer doesn't know about yet (e.g. just uploaded,
+    // or in tiers that were moved since the peer's last snapshot). Without this,
+    // any incoming broadcast silently drops images the user just added, because the
+    // peer's state only reflects what it received from US in a previous broadcast.
+    const remoteIds = new Set<string>([
+      ...remoteTiers.flatMap(t => t.items.map(i => i.id)),
+      ...safePool.map(i => i.id),
+    ])
+    for (const img of collectAllImages()) {
+      if (img.src && !remoteIds.has(img.id)) {
+        safePool.push({ id: img.id, src: img.src, name: img.name })
+      }
+    }
+
     tiers.value = remoteTiers
     pool.value  = safePool
     scheduleIdbSync()
+  }
+
+  function updateImageSrcs(images: Array<{ id: string; src: string; name?: string }>) {
+    const map = new Map(images.map(i => [i.id, i]))
+    for (const tier of tiers.value) {
+      for (const item of tier.items) {
+        const update = map.get(item.id)
+        if (update?.src && isSafeSrc(update.src)) item.src = update.src
+      }
+    }
+    for (const item of pool.value) {
+      const update = map.get(item.id)
+      if (update?.src && isSafeSrc(update.src)) item.src = update.src
+    }
   }
 
   return {
@@ -436,6 +464,8 @@ export const useTierStore = defineStore('tier', () => {
     clearTier,
     clearAll,
     clearPool,
+    collectAllImages,
+    updateImageSrcs,
     applyRemoteState,
   }
 })

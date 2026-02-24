@@ -41,9 +41,28 @@ export function useCollaboration(roomId: string) {
   function applyRemoteState(payload: StatePayload) {
     applyingRemote = true
     store.applyRemoteState(payload.tiers, payload.pool)
+    // After applying, request image data for any images we don't have locally.
+    // This fixes the case where a peer adds a new image: the slim broadcast has
+    // src='' for that image, and our local IDB doesn't have it yet, so we ask
+    // the sender to give us the actual base64 data.
+    requestMissingImages()
     // Reset after Vue's post-flush watcher has run, so the collab watch
     // sees applyingRemote=true and skips broadcasting the just-applied state
     nextTick(() => { applyingRemote = false })
+  }
+
+  // Send a broadcast asking peers for image data we're missing (src === '')
+  function requestMissingImages() {
+    if (!isConnected.value) return
+    const missingIds = store.collectAllImages()
+      .filter(img => !img.src)
+      .map(img => img.id)
+    if (missingIds.length === 0) return
+    channel.send({
+      type: 'broadcast',
+      event: 'request-images',
+      payload: { ids: missingIds },
+    })
   }
 
   // Strip image src before broadcasting: base64 data can be megabytes and will
@@ -87,6 +106,41 @@ export function useCollaboration(roomId: string) {
   // A peer broadcast their full state
   channel.on('broadcast', { event: 'state' }, ({ payload }) => {
     applyRemoteState(payload as StatePayload)
+  })
+
+  // A peer is requesting image data for IDs they received without src
+  channel.on('broadcast', { event: 'request-images' }, ({ payload }) => {
+    const req = payload as { ids?: unknown }
+    if (!Array.isArray(req?.ids)) return
+    const requestedIds = new Set<string>(req.ids as string[])
+    const toSend = store.collectAllImages().filter(img => img.src && requestedIds.has(img.id))
+    if (toSend.length === 0) return
+    // Batch images to stay under Supabase Realtime's ~1 MB message limit.
+    // Images are max 1024×1024 JPEG @ 0.85 so typically 100–400 KB as base64.
+    const BATCH_LIMIT = 700_000 // ~700 K base64 chars ≈ 525 KB decoded
+    let batch: Array<{ id: string; src: string; name?: string }> = []
+    let batchSize = 0
+    for (const img of toSend) {
+      if (batchSize + img.src.length > BATCH_LIMIT && batch.length > 0) {
+        channel.send({ type: 'broadcast', event: 'image-data', payload: { images: batch } })
+        batch = []
+        batchSize = 0
+      }
+      batch.push({ id: img.id, src: img.src, name: img.name })
+      batchSize += img.src.length
+    }
+    if (batch.length > 0) {
+      channel.send({ type: 'broadcast', event: 'image-data', payload: { images: batch } })
+    }
+  })
+
+  // A peer sent us image data — update our store without re-broadcasting
+  channel.on('broadcast', { event: 'image-data' }, ({ payload }) => {
+    const data = payload as { images?: unknown }
+    if (!Array.isArray(data?.images)) return
+    applyingRemote = true
+    store.updateImageSrcs(data.images as Array<{ id: string; src: string; name?: string }>)
+    nextTick(() => { applyingRemote = false })
   })
 
   // Track presence for peer count
