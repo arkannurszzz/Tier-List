@@ -243,11 +243,15 @@ export const useTierStore = defineStore('tier', () => {
         if (src) { item.src = src; usedIds.add(item.id) }
       }
 
-      // Recover orphaned IDB images (e.g. when localStorage was cleared).
-      // Rather than letting them get garbage-collected, put them back in the pool
-      // so the user's images are never silently lost.
-      for (const [id, src] of imageMap) {
-        if (!usedIds.has(id)) pool.value.push({ id, src })
+      // Recover orphaned IDB images ONLY when localStorage had no saved state
+      // (i.e. localStorage was cleared by the browser/user). When localStorage
+      // IS present, any IDB entry not referenced by it was explicitly deleted —
+      // recovering it would cause the "deleted image briefly reappears on refresh"
+      // bug where orphan recovery fights against collaboration sync deletions.
+      if (!saved) {
+        for (const [id, src] of imageMap) {
+          if (!usedIds.has(id)) pool.value.push({ id, src })
+        }
       }
 
       // All images from IDB are already persisted — no need to rewrite them.
