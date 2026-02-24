@@ -19,6 +19,55 @@ const editingLabel = ref(false);
 const labelInput = ref("");
 const settingsRef = ref<HTMLElement | null>(null);
 
+// ── Tier row drag-to-reorder ───────────────────────────────────────────────
+// Module-level so all TierRow instances share the same dragging state.
+// This avoids needing dataTransfer or Pinia for this simple case.
+let draggingTierId: string | null = null
+
+const rowDropPosition = ref<'before' | 'after' | null>(null)
+
+function onHandleDragStart(e: DragEvent) {
+  draggingTierId = props.tier.id
+  // Use a transparent 1×1 ghost so the entire row doesn't ghost awkwardly;
+  // the user can see exactly where the row will land via the drop indicator.
+  const ghost = document.createElement('div')
+  ghost.style.cssText = 'position:fixed;top:-999px;opacity:0;pointer-events:none'
+  document.body.appendChild(ghost)
+  e.dataTransfer?.setDragImage(ghost, 0, 0)
+  requestAnimationFrame(() => document.body.removeChild(ghost))
+}
+
+function onHandleDragEnd() {
+  draggingTierId = null
+  rowDropPosition.value = null
+}
+
+function onRowDragOver(e: DragEvent) {
+  if (!draggingTierId || draggingTierId === props.tier.id) return
+  e.preventDefault()
+  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+  rowDropPosition.value = e.clientY < rect.top + rect.height / 2 ? 'before' : 'after'
+}
+
+function onRowDragLeave(e: DragEvent) {
+  if (!draggingTierId) return
+  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+  const outside =
+    e.clientX < rect.left || e.clientX > rect.right ||
+    e.clientY < rect.top  || e.clientY > rect.bottom
+  if (outside) rowDropPosition.value = null
+}
+
+function onRowDrop(e: DragEvent) {
+  if (!draggingTierId || draggingTierId === props.tier.id) return
+  e.preventDefault()
+  const targetIndex = store.tiers.findIndex(t => t.id === props.tier.id)
+  const finalIndex  = rowDropPosition.value === 'after' ? targetIndex + 1 : targetIndex
+  store.moveTierTo(draggingTierId, finalIndex)
+  draggingTierId = null
+  rowDropPosition.value = null
+}
+
 // Clear insert indicator when any drag ends
 watch(
   () => store.draggingItem,
@@ -26,6 +75,7 @@ watch(
 );
 
 function onDragOver(e: DragEvent) {
+  if (!store.draggingItem) return; // ignore tier-row drags
   e.preventDefault();
   isDragOver.value = true;
 }
@@ -101,7 +151,25 @@ onUnmounted(() =>
 </script>
 
 <template>
-  <div class="tier-row">
+  <div
+    class="tier-row"
+    :class="{
+      'drop-before': rowDropPosition === 'before',
+      'drop-after':  rowDropPosition === 'after',
+    }"
+    @dragover="onRowDragOver"
+    @dragleave="onRowDragLeave"
+    @drop="onRowDrop"
+  >
+    <!-- Drag handle for reordering tier rows -->
+    <div
+      class="tier-drag-handle"
+      draggable="true"
+      title="Drag to reorder"
+      @dragstart="onHandleDragStart"
+      @dragend="onHandleDragEnd"
+    >⠿</div>
+
     <!-- Colored label -->
     <div
       class="tier-label"
@@ -211,11 +279,53 @@ onUnmounted(() =>
   display: flex;
   min-height: 114px;
   border-bottom: 1px solid #3a3a3a;
+  position: relative;
+  transition: border-color 0.1s;
 }
+
+.tier-row.drop-before::before,
+.tier-row.drop-after::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: #4af;
+  z-index: 10;
+  border-radius: 2px;
+}
+
+.tier-row.drop-before::before { top: -2px; }
+.tier-row.drop-after::after   { bottom: -2px; }
 
 /* Biar sudut atas tetap rounded setelah overflow:hidden dihapus dari container */
 .tier-row:first-child .tier-label {
   border-radius: 4px 0 0 0;
+}
+
+.tier-drag-handle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  min-width: 22px;
+  background: #1a1a1a;
+  border-right: 1px solid #2a2a2a;
+  color: #444;
+  font-size: 16px;
+  cursor: grab;
+  user-select: none;
+  transition: color 0.15s, background 0.15s;
+  letter-spacing: -2px;
+}
+
+.tier-drag-handle:hover {
+  color: #888;
+  background: #222;
+}
+
+.tier-drag-handle:active {
+  cursor: grabbing;
 }
 
 .tier-label {

@@ -375,6 +375,15 @@ export const useTierStore = defineStore('tier', () => {
     tiers.value.splice(idx + 1, 0, tier)
   }
 
+  function moveTierTo(tierId: string, toIndex: number) {
+    const fromIndex = tiers.value.findIndex(t => t.id === tierId)
+    if (fromIndex === -1 || fromIndex === toIndex) return
+    const tier = tiers.value.splice(fromIndex, 1)[0]
+    if (!tier) return
+    const adjusted = fromIndex < toIndex ? toIndex - 1 : toIndex
+    tiers.value.splice(Math.max(0, Math.min(adjusted, tiers.value.length)), 0, tier)
+  }
+
   function updateTierLabel(tierId: string, label: string) {
     const tier = tiers.value.find(t => t.id === tierId)
     // Enforce same 20-char limit even from remote peers
@@ -515,6 +524,7 @@ export const useTierStore = defineStore('tier', () => {
     removeTier,
     moveTierUp,
     moveTierDown,
+    moveTierTo,
     updateTierLabel,
     updateTierColor,
     clearTier,
