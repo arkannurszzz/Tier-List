@@ -36,6 +36,10 @@ function leaveRoom() {
   window.location.href = window.location.pathname
 }
 
+function reconnect() {
+  window.location.reload()
+}
+
 async function copyShareLink() {
   await navigator.clipboard.writeText(window.location.href)
   copied.value = true
@@ -122,26 +126,36 @@ onUnmounted(() => {
         <!-- Collaboration bar (only shown when Supabase env vars are set) -->
         <div v-if="hasCollabBackend" class="collab-bar">
           <template v-if="roomId">
-            <div class="room-status">
+            <div class="room-status" :class="{ 'room-offline': !isSyncing && !isConnected }">
               <span
                 class="status-dot"
                 :class="{
-                  syncing: isSyncing,
+                  syncing:   isSyncing,
                   connected: !isSyncing && isConnected,
-                  alone: !isSyncing && !isConnected,
+                  offline:   !isSyncing && !isConnected,
                 }"
               />
               <span class="room-label">Room</span>
               <code class="room-id">{{ roomId }}</code>
             </div>
 
-            <span class="peer-info">
+            <span class="peer-info" :class="{ 'peer-offline': !isSyncing && !isConnected }">
               <template v-if="isSyncing">Connecting...</template>
+              <template v-else-if="!isConnected">Offline</template>
               <template v-else-if="peerCount > 0">
                 {{ peerCount }} {{ peerCount === 1 ? 'other' : 'others' }} online
               </template>
-              <template v-else>Waiting for others...</template>
+              <template v-else>Online — just you</template>
             </span>
+
+            <button
+              v-if="!isSyncing && !isConnected"
+              class="collab-btn reconnect"
+              aria-label="Reconnect to collaboration room"
+              @click="reconnect"
+            >
+              ↻ Reconnect
+            </button>
 
             <button class="collab-btn share" aria-label="Copy share link to clipboard" @click="copyShareLink">
               {{ copied ? '✓ Copied!' : '🔗 Copy Link' }}
@@ -298,8 +312,9 @@ body {
   background: #4caf50;
 }
 
-.status-dot.alone {
-  background: #666;
+.status-dot.offline {
+  background: #e05050;
+  animation: pulse 1.5s infinite;
 }
 
 @keyframes pulse {
@@ -322,6 +337,15 @@ body {
 .peer-info {
   font-size: 12px;
   color: #888;
+}
+
+.peer-info.peer-offline {
+  color: #e05050;
+  font-weight: 600;
+}
+
+.room-status.room-offline {
+  border-color: #6a2a2a;
 }
 
 .collab-btn {
@@ -365,6 +389,17 @@ body {
 .collab-btn.leave:hover {
   background: #4c2323;
   color: #ff9d9d;
+}
+
+.collab-btn.reconnect {
+  background: #3a2800;
+  border-color: #7a5500;
+  color: #f0a500;
+}
+
+.collab-btn.reconnect:hover {
+  background: #4c3500;
+  color: #ffc040;
 }
 
 /* --- Main layout --- */

@@ -132,6 +132,28 @@ export const useTierStore = defineStore('tier', () => {
   // O(n) writes that make adding more images progressively slower and eventually fail.
   const _persistedIds = new Set<string>()
 
+  // Track image IDs that belong to THIS peer: either loaded from IDB at startup
+  // (user's own saved state) or explicitly added via addImagesToPool (new uploads/pastes).
+  // Used by applyRemoteState to distinguish "my image not yet known to peer" from
+  // "peer deleted an image I happened to receive via image-data sync".
+  // Images received via updateImageSrcs (from peers) are intentionally NOT added here
+  // so that peer deletions are respected without conflict.
+  const _localImageIds = new Set<string>()
+
+  // Persisted set of image IDs received from peers via collaboration sync.
+  // Stored in localStorage so the distinction survives a browser refresh:
+  // without this, a peer's image saved to IDB would be treated as "local" on
+  // reload, causing deleted images to resurrect after the deleting peer refreshes.
+  const PEER_IMGS_KEY = 'tier-maker-peer-imgs'
+  const _peerReceivedIds = new Set<string>((() => {
+    try { return JSON.parse(localStorage.getItem(PEER_IMGS_KEY) ?? '[]') as string[] }
+    catch { return [] }
+  })())
+  function savePeerIds() {
+    try { localStorage.setItem(PEER_IMGS_KEY, JSON.stringify([..._peerReceivedIds])) }
+    catch { /* ignore */ }
+  }
+
   function flushIdbSync() {
     if (idbTimer) { clearTimeout(idbTimer); idbTimer = null }
     const all = collectAllImages()
@@ -229,7 +251,18 @@ export const useTierStore = defineStore('tier', () => {
       }
 
       // All images from IDB are already persisted — no need to rewrite them.
-      for (const id of imageMap.keys()) _persistedIds.add(id)
+      // Build _localImageIds from IDB images, but exclude peer-received IDs so
+      // that deletions from the original uploader propagate even after a refresh.
+      // Also prune _peerReceivedIds to only IDs still present in our state.
+      const currentIds = new Set(collectAllImages().map(img => img.id))
+      for (const id of [..._peerReceivedIds]) {
+        if (!currentIds.has(id)) _peerReceivedIds.delete(id)
+      }
+      savePeerIds()
+      for (const id of imageMap.keys()) {
+        _persistedIds.add(id)
+        if (!_peerReceivedIds.has(id)) _localImageIds.add(id)
+      }
 
       hydrating = false
 
@@ -269,6 +302,7 @@ export const useTierStore = defineStore('tier', () => {
   // ── Actions ───────────────────────────────────────────────────────────────
 
   function addImagesToPool(images: TierImage[]) {
+    for (const img of images) _localImageIds.add(img.id)
     pool.value.push(...images)
   }
 
@@ -413,16 +447,18 @@ export const useTierStore = defineStore('tier', () => {
       if (!item.src) item.src = localSrcMap.get(item.id) ?? ''
     }
 
-    // Preserve local images the peer doesn't know about yet (e.g. just uploaded,
-    // or in tiers that were moved since the peer's last snapshot). Without this,
-    // any incoming broadcast silently drops images the user just added, because the
-    // peer's state only reflects what it received from US in a previous broadcast.
+    // Preserve images that belong to THIS peer but the remote doesn't know about yet
+    // (e.g. just uploaded, or moved to a tier since the peer's last snapshot).
+    // We only preserve images in _localImageIds (uploaded by us or loaded from IDB at
+    // startup) — NOT images received via updateImageSrcs from peers in this session.
+    // This distinction lets peer deletions propagate cleanly: if peer A uploaded img1,
+    // we received it via image-data sync, and A later deletes it, we won't resurrect it.
     const remoteIds = new Set<string>([
       ...remoteTiers.flatMap(t => t.items.map(i => i.id)),
       ...safePool.map(i => i.id),
     ])
     for (const img of collectAllImages()) {
-      if (img.src && !remoteIds.has(img.id)) {
+      if (img.src && !remoteIds.has(img.id) && _localImageIds.has(img.id)) {
         safePool.push({ id: img.id, src: img.src, name: img.name })
       }
     }
@@ -434,16 +470,32 @@ export const useTierStore = defineStore('tier', () => {
 
   function updateImageSrcs(images: Array<{ id: string; src: string; name?: string }>) {
     const map = new Map(images.map(i => [i.id, i]))
+    let peerIdsChanged = false
     for (const tier of tiers.value) {
       for (const item of tier.items) {
         const update = map.get(item.id)
-        if (update?.src && isSafeSrc(update.src)) item.src = update.src
+        if (update?.src && isSafeSrc(update.src)) {
+          item.src = update.src
+          // Mark as peer-received if not already owned locally, so that the
+          // uploader can delete it and have the deletion survive our refresh.
+          if (!_localImageIds.has(item.id) && !_peerReceivedIds.has(item.id)) {
+            _peerReceivedIds.add(item.id)
+            peerIdsChanged = true
+          }
+        }
       }
     }
     for (const item of pool.value) {
       const update = map.get(item.id)
-      if (update?.src && isSafeSrc(update.src)) item.src = update.src
+      if (update?.src && isSafeSrc(update.src)) {
+        item.src = update.src
+        if (!_localImageIds.has(item.id) && !_peerReceivedIds.has(item.id)) {
+          _peerReceivedIds.add(item.id)
+          peerIdsChanged = true
+        }
+      }
     }
+    if (peerIdsChanged) savePeerIds()
   }
 
   return {
