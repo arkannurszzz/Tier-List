@@ -481,6 +481,14 @@ export const useTierStore = defineStore('tier', () => {
     scheduleIdbSync()
   }
 
+  // Called by useCollaboration after each state broadcast.
+  // Once we've announced an image to all peers it's no longer "locally exclusive",
+  // so remove it from _localImageIds. This lets any peer (not just the uploader)
+  // delete the image without the owner's preserve-loop resurrecting it.
+  function markAsBroadcasted(ids: string[]) {
+    for (const id of ids) _localImageIds.delete(id)
+  }
+
   function updateImageSrcs(images: Array<{ id: string; src: string; name?: string }>) {
     const map = new Map(images.map(i => [i.id, i]))
     let peerIdsChanged = false
@@ -532,6 +540,7 @@ export const useTierStore = defineStore('tier', () => {
     clearPool,
     collectAllImages,
     updateImageSrcs,
+    markAsBroadcasted,
     applyRemoteState,
   }
 })

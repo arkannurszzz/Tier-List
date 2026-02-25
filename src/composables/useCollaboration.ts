@@ -78,6 +78,26 @@ export function useCollaboration(roomId: string) {
     }
   }
 
+  // Central send helper: broadcast current state AND remove the sent image IDs
+  // from the store's _localImageIds.  Once peers know about an image it's no
+  // longer "locally exclusive", so any peer (including the uploader) can delete
+  // it without the preserve-loop in applyRemoteState resurrecting it.
+  function sendStatePayload(payload: StatePayload) {
+    channel.send({ type: 'broadcast', event: 'state', payload })
+    const ids = [
+      ...payload.pool.map(i => i.id),
+      ...payload.tiers.flatMap(t => t.items.map(i => i.id)),
+    ]
+    store.markAsBroadcasted(ids)
+  }
+
+  // Send state immediately (no debounce) — used when responding to a peer request
+  // or when a new peer joins so they get our current state right away.
+  function broadcastStateNow() {
+    if (applyingRemote || !isConnected.value) return
+    sendStatePayload(slimPayload())
+  }
+
   function broadcastState() {
     if (applyingRemote) return
     // Never send before the WebSocket is connected — channel.send() would fall
@@ -86,21 +106,13 @@ export function useCollaboration(roomId: string) {
     if (!isConnected.value) return
     if (broadcastTimer) clearTimeout(broadcastTimer)
     broadcastTimer = setTimeout(() => {
-      channel.send({
-        type: 'broadcast',
-        event: 'state',
-        payload: slimPayload(),
-      })
+      sendStatePayload(slimPayload())
     }, 200)
   }
 
   // Another peer just joined and is requesting the current state
   channel.on('broadcast', { event: 'request-state' }, () => {
-    channel.send({
-      type: 'broadcast',
-      event: 'state',
-      payload: slimPayload(),
-    })
+    broadcastStateNow()
   })
 
   // A peer broadcast their full state
@@ -150,7 +162,13 @@ export function useCollaboration(roomId: string) {
   })
   channel.on('presence', { event: 'join' }, () => {
     const states = channel.presenceState()
-    peerCount.value = Math.max(0, Object.keys(states).length - 1)
+    const newCount = Math.max(0, Object.keys(states).length - 1)
+    // A new peer just joined — proactively push our state to them.
+    // This is a safety net alongside the request-state/response handshake:
+    // if the joiner's request-state broadcast is lost, they still get our state
+    // because we push it as soon as we see them arrive in presence.
+    if (newCount > peerCount.value) broadcastStateNow()
+    peerCount.value = newCount
   })
   channel.on('presence', { event: 'leave' }, () => {
     const states = channel.presenceState()
@@ -168,8 +186,9 @@ export function useCollaboration(roomId: string) {
         event: 'request-state',
         payload: {},
       })
-    } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
+    } else if (status === 'TIMED_OUT' || status === 'CLOSED' || status === 'CHANNEL_ERROR') {
       isConnected.value = false
+      isSyncing.value = false
     }
   })
 

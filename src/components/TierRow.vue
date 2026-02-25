@@ -1,3 +1,11 @@
+<script lang="ts">
+// Truly module-level (shared across ALL TierRow instances).
+// <script setup> variables are per-instance, so draggingTierId would always
+// be null on the drop-target rows if declared there — the drag would never work.
+let draggingTierId: string | null = null
+let dragGhost: HTMLElement | null = null
+</script>
+
 <script setup lang="ts">
 import { ref, watch, onMounted, onUnmounted } from "vue";
 import type { TierConfig } from "@/stores/tierStore";
@@ -20,26 +28,35 @@ const labelInput = ref("");
 const settingsRef = ref<HTMLElement | null>(null);
 
 // ── Tier row drag-to-reorder ───────────────────────────────────────────────
-// Module-level so all TierRow instances share the same dragging state.
-// This avoids needing dataTransfer or Pinia for this simple case.
-let draggingTierId: string | null = null
+// draggingTierId and dragGhost are declared in the module-level <script> block
+// above so they are shared across ALL TierRow instances. Variables declared
+// inside <script setup> are per-instance — the drop-target rows would never
+// see the dragged tier ID if it were declared here.
 
 const rowDropPosition = ref<'before' | 'after' | null>(null)
 
 function onHandleDragStart(e: DragEvent) {
   draggingTierId = props.tier.id
-  // Use a transparent 1×1 ghost so the entire row doesn't ghost awkwardly;
-  // the user can see exactly where the row will land via the drop indicator.
-  const ghost = document.createElement('div')
-  ghost.style.cssText = 'position:fixed;top:-999px;opacity:0;pointer-events:none'
-  document.body.appendChild(ghost)
-  e.dataTransfer?.setDragImage(ghost, 0, 0)
-  requestAnimationFrame(() => document.body.removeChild(ghost))
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move'
+    // setData is required for Firefox — without it the drag is silently cancelled
+    e.dataTransfer.setData('text/plain', props.tier.id)
+  }
+  // Invisible ghost so the handle doesn't float over the page while dragging;
+  // the blue drop-indicator line shows where the row will land instead.
+  dragGhost = document.createElement('div')
+  dragGhost.style.cssText = 'position:fixed;top:-999px;pointer-events:none'
+  document.body.appendChild(dragGhost)
+  e.dataTransfer?.setDragImage(dragGhost, 0, 0)
 }
 
 function onHandleDragEnd() {
   draggingTierId = null
   rowDropPosition.value = null
+  // Clean up in dragend (not requestAnimationFrame) so the ghost element is
+  // guaranteed to still be in the DOM when the browser captures the drag image.
+  dragGhost?.remove()
+  dragGhost = null
 }
 
 function onRowDragOver(e: DragEvent) {
